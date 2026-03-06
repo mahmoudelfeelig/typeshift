@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+client/dist
+server/dist
+*.log
+
+client/.next
+build-output.txt

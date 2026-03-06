@@ -1,0 +1,17 @@
+{
+  "name": "typeshift-platform",
+  "private": true,
+  "version": "0.2.0",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build -w server && npm run build -w client",
+    "test": "npm run test -w server && npm run test -w client",
+    "backup:db": "bash ./scripts/backup-db.sh",
+    "restore:db": "bash ./scripts/restore-db.sh",
+    "start": "node scripts/start.mjs"
+  }
+}

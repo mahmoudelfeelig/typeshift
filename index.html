@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TypeShift Station</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Syne:wght@500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="nebula-layer"></div>
+    <div class="grain-layer"></div>
+    <div class="grid-layer"></div>
+
+    <div class="app-shell">
+      <header class="topbar panel">
+        <div class="brand-wrap">
+          <div class="brand-glyph">TS</div>
+          <div>
+            <h1>TypeShift Station</h1>
+            <p>Arcade typing district with experimental game modes</p>
+          </div>
+        </div>
+        <div class="top-controls">
+          <button id="new-seed-btn" class="ghost-btn">Remix Prompt</button>
+          <div class="status-chip" id="mode-chip">TIME TRIAL</div>
+        </div>
+      </header>
+
+      <main class="layout-grid">
+        <section class="panel mode-panel">
+          <div class="panel-header">
+            <h2>District Map</h2>
+            <p>Switch between typing zones</p>
+          </div>
+
+          <div class="mode-grid">
+            <button class="mode-card active" data-mode="time">
+              <span class="mode-name">Time Trial</span>
+              <span class="mode-desc">Classic rapid-fire race</span>
+            </button>
+            <button class="mode-card" data-mode="quote">
+              <span class="mode-name">Quote Rush</span>
+              <span class="mode-desc">Single passage precision run</span>
+            </button>
+            <button class="mode-card" data-mode="meteor">
+              <span class="mode-name">Meteor</span>
+              <span class="mode-desc">Destroy falling words</span>
+            </button>
+            <button class="mode-card" data-mode="zen">
+              <span class="mode-name">Zen Flow</span>
+              <span class="mode-desc">No timer, endless rhythm</span>
+            </button>
+          </div>
+
+          <div class="mode-caption" id="mode-caption">
+            Time Trial: push max WPM before countdown reaches zero.
+          </div>
+        </section>
+
+        <section class="panel arena-panel">
+          <div class="arena-header">
+            <div>
+              <p class="label">Session State</p>
+              <h3 id="phase-label">Ready</h3>
+            </div>
+            <div class="timer-badge" id="timer-label">60s</div>
+          </div>
+
+          <div id="prompt-zone" class="prompt-zone" aria-live="polite"></div>
+
+          <div id="meteor-zone" class="meteor-zone hidden" aria-live="polite">
+            <div class="meteor-hint">Type words and hit space or enter to fire.</div>
+          </div>
+
+          <div class="input-row">
+            <input
+              id="type-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Type to start..."
+            />
+            <button id="start-btn" class="primary-btn">Launch</button>
+            <button id="restart-btn" class="ghost-btn">Restart</button>
+          </div>
+
+          <div class="legend">
+            <span><i class="dot good"></i>Correct</span>
+            <span><i class="dot bad"></i>Error</span>
+            <span><i class="dot current"></i>Current</span>
+          </div>
+        </section>
+
+        <aside class="panel control-panel">
+          <section class="stats-block">
+            <h3>Live Stats</h3>
+            <div class="stats-grid">
+              <article>
+                <p>WPM</p>
+                <h4 id="stat-wpm">0</h4>
+              </article>
+              <article>
+                <p>Raw</p>
+                <h4 id="stat-raw">0</h4>
+              </article>
+              <article>
+                <p>Accuracy</p>
+                <h4 id="stat-acc">100%</h4>
+              </article>
+              <article>
+                <p>Streak</p>
+                <h4 id="stat-streak">0</h4>
+              </article>
+              <article>
+                <p>Errors</p>
+                <h4 id="stat-errors">0</h4>
+              </article>
+              <article>
+                <p>Lives</p>
+                <h4 id="stat-lives">-</h4>
+              </article>
+            </div>
+          </section>
+
+          <section class="settings-block">
+            <h3>Session Tuning</h3>
+            <label>
+              Duration
+              <select id="duration-select">
+                <option value="30">30s</option>
+                <option value="60" selected>60s</option>
+                <option value="90">90s</option>
+                <option value="120">120s</option>
+              </select>
+            </label>
+
+            <label>
+              Dictionary Pack
+              <select id="dictionary-pack">
+                <option value="core" selected>Core</option>
+                <option value="tech">Tech</option>
+                <option value="myth">Mythic</option>
+                <option value="blitz">Blitz</option>
+              </select>
+            </label>
+
+            <div class="toggle-row">
+              <label><input id="opt-punctuation" type="checkbox" /> Punctuation</label>
+              <label><input id="opt-numbers" type="checkbox" /> Numbers</label>
+              <label><input id="opt-lowercase" type="checkbox" /> Lowercase lock</label>
+              <label><input id="opt-custom-only" type="checkbox" /> Custom only</label>
+            </div>
+          </section>
+
+          <section class="custom-block">
+            <h3>Custom Dictionary</h3>
+            <p class="sub">
+              Add words separated by spaces, commas, or new lines.
+            </p>
+            <textarea
+              id="custom-words"
+              rows="5"
+              placeholder="bossfight artifact hyperdrive..."
+            ></textarea>
+            <div class="actions">
+              <button id="save-custom-btn" class="primary-btn">Save Dictionary</button>
+              <button id="clear-custom-btn" class="ghost-btn">Clear</button>
+            </div>
+            <p id="custom-status" class="status-line"></p>
+          </section>
+
+          <section id="session-report" class="report hidden"></section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
