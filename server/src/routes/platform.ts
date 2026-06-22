@@ -2,11 +2,18 @@ import crypto, { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { config } from "../config.js";
+import {
+  deleteMemoryChallengeScoresByUsername,
+  deleteMemoryScoresByUsername,
+  getMemoryChallengeScoresByUsername,
+  getMemoryScoresByUsername,
+} from "../db/inMemory.js";
 import { pool } from "../db/pool.js";
 import { isDatabaseOnline } from "../db/state.js";
 import {
   createPasswordHash,
   extractBearerToken,
+  hashClientValue,
   normalizeUsername,
   passwordMeetsPolicy,
   signAccountToken,
@@ -119,6 +126,15 @@ const loginSchema = z.object({
   password: z.string().min(1).max(128),
 });
 
+const passwordChangeSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(10).max(128),
+});
+
+const deleteAccountSchema = z.object({
+  confirmHandle: z.string().trim().min(2).max(24),
+});
+
 const preferencesSchema = z.object({
   preferences: z.record(z.unknown()),
 });
@@ -152,30 +168,138 @@ const duelUpdateSchema = z.object({
   finished: z.boolean().default(false),
 });
 
+export function resetPlatformMemoryState(): void {
+  memoryAccountsById.clear();
+  memoryAccountsByHandle.clear();
+  memoryPreferences.clear();
+  memoryFriendRequests.clear();
+  memoryReplayShares.clear();
+  memoryWebhooks.clear();
+  memoryAccountSessions.clear();
+  rankedQueue.length = 0;
+  casualQueue.length = 0;
+  activeDuels.clear();
+  accountToDuel.clear();
+}
+
 function normalizeHandle(raw: string): { handle: string; normalized: string } {
   const handle = normalizeUsername(raw);
   return { handle, normalized: handle.toLowerCase() };
 }
 
-async function getAuthedAccount(req: Request): Promise<{ id: string; handle: string; rating: number } | null> {
+function describeSessionLabel(userAgent?: string | null): string {
+  const source = (userAgent ?? "").toLowerCase();
+  const browser = source.includes("edg/")
+    ? "Edge"
+    : source.includes("firefox/")
+      ? "Firefox"
+      : source.includes("chrome/")
+        ? "Chrome"
+        : source.includes("safari/")
+          ? "Safari"
+          : "Browser";
+  const os = source.includes("windows")
+    ? "Windows"
+    : source.includes("android")
+      ? "Android"
+      : source.includes("iphone") || source.includes("ipad") || source.includes("ios")
+        ? "iOS"
+        : source.includes("mac os") || source.includes("macintosh")
+          ? "macOS"
+          : source.includes("linux")
+            ? "Linux"
+            : "Unknown OS";
+  return `${browser} on ${os}`;
+}
+
+interface MemoryAccountSession {
+  id: string;
+  accountId: string;
+  label: string;
+  userAgentHash: string;
+  ipHash: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+const memoryAccountSessions = new Map<string, MemoryAccountSession>();
+
+async function createAccountSession(input: {
+  accountId: string;
+  handle: string;
+  req: Request;
+}): Promise<{ sessionId: string; token: string }> {
+  const sessionId = randomUUID();
+  const label = describeSessionLabel(input.req.get("user-agent"));
+  const userAgentHash = hashClientValue(input.req.get("user-agent") ?? "");
+  const ipHash = hashClientValue(input.req.ip ?? "0.0.0.0");
+  const expiresAt = new Date(Date.now() + ACCOUNT_SESSION_TTL_MS).toISOString();
+  if (!isDatabaseOnline()) {
+    memoryAccountSessions.set(sessionId, {
+      id: sessionId,
+      accountId: input.accountId,
+      label,
+      userAgentHash,
+      ipHash,
+      createdAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      expiresAt,
+      revokedAt: null,
+    });
+    return {
+      sessionId,
+      token: signAccountToken(sessionId, input.accountId, input.handle),
+    };
+  }
+  await pool.query(
+    `INSERT INTO account_sessions (id, account_id, label, user_agent_hash, ip_hash, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [sessionId, input.accountId, label, userAgentHash, ipHash, expiresAt],
+  );
+  return {
+    sessionId,
+    token: signAccountToken(sessionId, input.accountId, input.handle),
+  };
+}
+
+async function getAuthedAccount(
+  req: Request,
+): Promise<{ id: string; handle: string; rating: number; sessionId: string } | null> {
   const token = extractBearerToken(req.get("authorization"));
   if (!token) return null;
   const verified = verifyAccountToken(token);
   if (!verified) return null;
   if (!isDatabaseOnline()) {
     const account = memoryAccountsById.get(verified.aid);
-    if (!account) return null;
-    return { id: account.id, handle: account.handle, rating: account.rating };
+    const session = memoryAccountSessions.get(verified.sid);
+    if (!account || !session || session.accountId !== account.id || session.revokedAt || Date.parse(session.expiresAt) <= Date.now()) {
+      return null;
+    }
+    session.lastSeenAt = new Date().toISOString();
+    return { id: account.id, handle: account.handle, rating: account.rating, sessionId: session.id };
   }
   const result = await pool.query(
-    `SELECT id, handle, rating
-       FROM accounts
-      WHERE id = $1`,
-    [verified.aid],
+    `SELECT a.id, a.handle, a.rating, s.id AS session_id
+       FROM accounts a
+       JOIN account_sessions s ON s.account_id = a.id
+      WHERE a.id = $1
+        AND s.id = $2
+        AND s.revoked_at IS NULL
+        AND s.expires_at > NOW()`,
+    [verified.aid, verified.sid],
   );
   if (result.rowCount !== 1) return null;
-  const row = result.rows[0] as { id: string; handle: string; rating: number };
-  return { id: row.id, handle: row.handle, rating: Number(row.rating) };
+  await pool.query(
+    `UPDATE account_sessions
+        SET last_seen_at = NOW()
+      WHERE id = $1
+        AND last_seen_at < NOW() - INTERVAL '1 minute'`,
+    [verified.sid],
+  );
+  const row = result.rows[0] as { id: string; handle: string; rating: number; session_id: string };
+  return { id: row.id, handle: row.handle, rating: Number(row.rating), sessionId: row.session_id };
 }
 
 function removeFromQueue(queue: QueueEntry[], accountId: string): void {
@@ -424,9 +548,9 @@ router.post("/account/register", async (req, res, next) => {
       memoryAccountsById.set(account.id, account);
       memoryAccountsByHandle.set(account.handleNormalized, account);
       memoryPreferences.set(account.id, {});
-      const token = signAccountToken(account.id, account.handle);
+      const session = await createAccountSession({ accountId: account.id, handle: account.handle, req });
       return res.status(201).json({
-        token,
+        token: session.token,
         account: {
           id: account.id,
           handle: account.handle,
@@ -456,9 +580,9 @@ router.post("/account/register", async (req, res, next) => {
        ON CONFLICT (account_id) DO NOTHING`,
       [accountId],
     );
-    const token = signAccountToken(accountId, normalized.handle);
+    const session = await createAccountSession({ accountId, handle: normalized.handle, req });
     return res.status(201).json({
-      token,
+      token: session.token,
       account: {
         id: accountId,
         handle: normalized.handle,
@@ -487,9 +611,9 @@ router.post("/account/login", async (req, res, next) => {
       if (!account || !verifyPasswordHash(parsed.data.password, account.passwordSalt, account.passwordHash)) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
-      const token = signAccountToken(account.id, account.handle);
+      const session = await createAccountSession({ accountId: account.id, handle: account.handle, req });
       return res.json({
-        token,
+        token: session.token,
         account: {
           id: account.id,
           handle: account.handle,
@@ -525,9 +649,9 @@ router.post("/account/login", async (req, res, next) => {
     if (!ok) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
-    const token = signAccountToken(row.id, row.handle);
+    const session = await createAccountSession({ accountId: row.id, handle: row.handle, req });
     return res.json({
-      token,
+      token: session.token,
       account: {
         id: row.id,
         handle: row.handle,
@@ -621,6 +745,388 @@ router.put("/account/preferences", async (req, res, next) => {
       [account.id, parsed.data.preferences],
     );
     return res.json({ ok: true, preferences: parsed.data.preferences });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get("/account/sessions", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!isDatabaseOnline()) {
+      const sessions = [...memoryAccountSessions.values()]
+        .filter((session) => session.accountId === account.id && !session.revokedAt)
+        .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+        .map((session) => ({
+          id: session.id,
+          label: session.label,
+          createdAt: session.createdAt,
+          lastSeenAt: session.lastSeenAt,
+          expiresAt: session.expiresAt,
+          isCurrent: session.id === account.sessionId,
+        }));
+      return res.json({ currentSessionId: account.sessionId, sessions });
+    }
+    const result = await pool.query(
+      `SELECT id, label, created_at, last_seen_at, expires_at
+         FROM account_sessions
+        WHERE account_id = $1
+          AND revoked_at IS NULL
+          AND expires_at > NOW()
+        ORDER BY last_seen_at DESC, created_at DESC`,
+      [account.id],
+    );
+    return res.json({
+      currentSessionId: account.sessionId,
+      sessions: result.rows.map((row) => ({
+        id: row.id as string,
+        label: row.label as string,
+        createdAt: row.created_at as string,
+        lastSeenAt: row.last_seen_at as string,
+        expiresAt: row.expires_at as string,
+        isCurrent: row.id === account.sessionId,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/account/logout", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!isDatabaseOnline()) {
+      const session = memoryAccountSessions.get(account.sessionId);
+      if (session) {
+        session.revokedAt = new Date().toISOString();
+      }
+      return res.json({ ok: true });
+    }
+    await pool.query(
+      `UPDATE account_sessions
+          SET revoked_at = NOW()
+        WHERE id = $1
+          AND account_id = $2`,
+      [account.sessionId, account.id],
+    );
+    return res.json({ ok: true });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/account/logout-others", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!isDatabaseOnline()) {
+      for (const session of memoryAccountSessions.values()) {
+        if (session.accountId === account.id && session.id !== account.sessionId) {
+          session.revokedAt = new Date().toISOString();
+        }
+      }
+      return res.json({ ok: true });
+    }
+    await pool.query(
+      `UPDATE account_sessions
+          SET revoked_at = NOW()
+        WHERE account_id = $1
+          AND id <> $2
+          AND revoked_at IS NULL`,
+      [account.id, account.sessionId],
+    );
+    return res.json({ ok: true });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.delete("/account/sessions/:id", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const targetSessionId = req.params.id;
+    if (!targetSessionId) {
+      return res.status(400).json({ error: "Missing session id" });
+    }
+    if (!isDatabaseOnline()) {
+      const session = memoryAccountSessions.get(targetSessionId);
+      if (!session || session.accountId !== account.id) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      session.revokedAt = new Date().toISOString();
+      return res.json({ ok: true, currentSessionRevoked: targetSessionId === account.sessionId });
+    }
+    const result = await pool.query(
+      `UPDATE account_sessions
+          SET revoked_at = NOW()
+        WHERE id = $1
+          AND account_id = $2
+          AND revoked_at IS NULL`,
+      [targetSessionId, account.id],
+    );
+    if (result.rowCount !== 1) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    return res.json({ ok: true, currentSessionRevoked: targetSessionId === account.sessionId });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/account/password", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const parsed = passwordChangeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid password change payload" });
+    }
+    if (!passwordMeetsPolicy(parsed.data.newPassword)) {
+      return res.status(422).json({
+        error: "Password must be 10+ chars and include uppercase, lowercase, and number",
+      });
+    }
+
+    if (!isDatabaseOnline()) {
+      const memory = memoryAccountsById.get(account.id);
+      if (!memory || !verifyPasswordHash(parsed.data.currentPassword, memory.passwordSalt, memory.passwordHash)) {
+        return res.status(401).json({ error: "Current password is incorrect" });
+      }
+      const nextPassword = createPasswordHash(parsed.data.newPassword);
+      memory.passwordHash = nextPassword.hash;
+      memory.passwordSalt = nextPassword.salt;
+      for (const session of memoryAccountSessions.values()) {
+        if (session.accountId === account.id && session.id !== account.sessionId) {
+          session.revokedAt = new Date().toISOString();
+        }
+      }
+      return res.json({ ok: true });
+    }
+
+    const result = await pool.query(
+      `SELECT password_hash, password_salt
+         FROM accounts
+        WHERE id = $1`,
+      [account.id],
+    );
+    if (result.rowCount !== 1) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+    const row = result.rows[0] as { password_hash: string; password_salt: string };
+    if (!verifyPasswordHash(parsed.data.currentPassword, row.password_salt, row.password_hash)) {
+      return res.status(401).json({ error: "Current password is incorrect" });
+    }
+    const nextPassword = createPasswordHash(parsed.data.newPassword);
+    await pool.query(
+      `UPDATE accounts
+          SET password_hash = $2,
+              password_salt = $3
+        WHERE id = $1`,
+      [account.id, nextPassword.hash, nextPassword.salt],
+    );
+    await pool.query(
+      `UPDATE account_sessions
+          SET revoked_at = NOW()
+        WHERE account_id = $1
+          AND id <> $2
+          AND revoked_at IS NULL`,
+      [account.id, account.sessionId],
+    );
+    return res.json({ ok: true });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get("/account/export", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    if (!isDatabaseOnline()) {
+      const preferences = memoryPreferences.get(account.id) ?? {};
+      const sessions = [...memoryAccountSessions.values()]
+        .filter((session) => session.accountId === account.id)
+        .map((session) => ({
+          id: session.id,
+          label: session.label,
+          createdAt: session.createdAt,
+          lastSeenAt: session.lastSeenAt,
+          expiresAt: session.expiresAt,
+          revokedAt: session.revokedAt,
+        }));
+      const replayShares = [...memoryReplayShares.values()].filter((entry) => entry.accountId === account.id);
+      const webhooks = [...memoryWebhooks.values()].filter((entry) => entry.accountId === account.id);
+      return res.json({
+        exportedAt: new Date().toISOString(),
+        account: memoryAccountsById.get(account.id),
+        preferences,
+        sessions,
+        replayShares,
+        webhooks,
+        scores: getMemoryScoresByUsername(account.handle),
+        challengeScores: getMemoryChallengeScoresByUsername(account.handle),
+      });
+    }
+
+    const [accountResult, sessionsResult, replayResult, webhookResult, scoresResult, challengeScoresResult] =
+      await Promise.all([
+        pool.query(
+          `SELECT a.id, a.handle, a.rating, a.locale, a.verified_runs, a.created_at, p.preferences
+             FROM accounts a
+             LEFT JOIN account_preferences p ON p.account_id = a.id
+            WHERE a.id = $1`,
+          [account.id],
+        ),
+        pool.query(
+          `SELECT id, label, created_at, last_seen_at, expires_at, revoked_at
+             FROM account_sessions
+            WHERE account_id = $1
+            ORDER BY created_at DESC`,
+          [account.id],
+        ),
+        pool.query(
+          `SELECT id, mode, title, replay, is_public, created_at
+             FROM shared_replays
+            WHERE account_id = $1
+            ORDER BY created_at DESC`,
+          [account.id],
+        ),
+        pool.query(
+          `SELECT id, target_url, events, active, created_at
+             FROM webhook_endpoints
+            WHERE account_id = $1
+            ORDER BY created_at DESC`,
+          [account.id],
+        ),
+        pool.query(
+          `SELECT id, username, mode, wpm, raw, accuracy, errors, streak, duration_ms, certified, created_at
+             FROM scores
+            WHERE username = $1
+            ORDER BY created_at DESC
+            LIMIT 5000`,
+          [account.handle],
+        ),
+        pool.query(
+          `SELECT id, challenge_date, username, mode, wpm, raw, accuracy, errors, streak, duration_ms, points, created_at
+             FROM challenge_scores
+            WHERE username = $1
+            ORDER BY created_at DESC
+            LIMIT 5000`,
+          [account.handle],
+        ),
+      ]);
+
+    return res.json({
+      exportedAt: new Date().toISOString(),
+      account: accountResult.rows[0] ?? null,
+      preferences: (accountResult.rows[0]?.preferences as Record<string, unknown> | null) ?? {},
+      sessions: sessionsResult.rows,
+      replayShares: replayResult.rows,
+      webhooks: webhookResult.rows,
+      scores: scoresResult.rows,
+      challengeScores: challengeScoresResult.rows,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.delete("/account", async (req, res, next) => {
+  try {
+    const account = await getAuthedAccount(req);
+    if (!account) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const parsed = deleteAccountSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid account deletion payload" });
+    }
+    if (normalizeHandle(parsed.data.confirmHandle).normalized !== normalizeHandle(account.handle).normalized) {
+      return res.status(422).json({ error: "Handle confirmation does not match" });
+    }
+
+    removeFromQueue(rankedQueue, account.id);
+    removeFromQueue(casualQueue, account.id);
+    const duelId = accountToDuel.get(account.id);
+    if (duelId) {
+      activeDuels.delete(duelId);
+      for (const [key, value] of accountToDuel.entries()) {
+        if (value === duelId) {
+          accountToDuel.delete(key);
+        }
+      }
+    }
+
+    if (!isDatabaseOnline()) {
+      memoryAccountsById.delete(account.id);
+      memoryAccountsByHandle.delete(normalizeHandle(account.handle).normalized);
+      memoryPreferences.delete(account.id);
+      for (const [id, session] of memoryAccountSessions.entries()) {
+        if (session.accountId === account.id) {
+          memoryAccountSessions.delete(id);
+        }
+      }
+      for (const [id, row] of memoryFriendRequests.entries()) {
+        if (row.fromAccountId === account.id || row.toAccountId === account.id) {
+          memoryFriendRequests.delete(id);
+        }
+      }
+      for (const [id, row] of memoryReplayShares.entries()) {
+        if (row.accountId === account.id) {
+          memoryReplayShares.delete(id);
+        }
+      }
+      for (const [id, row] of memoryWebhooks.entries()) {
+        if (row.accountId === account.id) {
+          memoryWebhooks.delete(id);
+        }
+      }
+      deleteMemoryScoresByUsername(account.handle);
+      deleteMemoryChallengeScoresByUsername(account.handle);
+      return res.json({ ok: true, deleted: true });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`DELETE FROM scores WHERE username = $1`, [account.handle]);
+      await client.query(`DELETE FROM challenge_scores WHERE username = $1`, [account.handle]);
+      await client.query(`DELETE FROM shared_replays WHERE account_id = $1`, [account.id]);
+      await client.query(
+        `DELETE FROM account_friend_requests WHERE from_account_id = $1 OR to_account_id = $1`,
+        [account.id],
+      );
+      await client.query(`DELETE FROM webhook_endpoints WHERE account_id = $1`, [account.id]);
+      await client.query(`DELETE FROM account_sessions WHERE account_id = $1`, [account.id]);
+      await client.query(`DELETE FROM account_preferences WHERE account_id = $1`, [account.id]);
+      const deleteAccountResult = await client.query(`DELETE FROM accounts WHERE id = $1`, [account.id]);
+      if (deleteAccountResult.rowCount !== 1) {
+        throw new Error("Account deletion failed");
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return res.json({ ok: true, deleted: true });
   } catch (error) {
     return next(error);
   }

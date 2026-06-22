@@ -65,6 +65,13 @@ export function createMemorySession(input: Omit<MemorySession, "consumed">): voi
   sessions.set(input.id, { ...input, consumed: false });
 }
 
+export function resetInMemoryDatabase(): void {
+  sessions.clear();
+  scores.length = 0;
+  challengeScores.length = 0;
+  analyticsAggregates.clear();
+}
+
 export function consumeMemorySession(input: {
   id: string;
   mode: Mode;
@@ -130,6 +137,34 @@ export function getMemoryChallengeLeaderboard(
       return a.createdAt.localeCompare(b.createdAt);
     })
     .slice(0, limit);
+}
+
+export function getMemoryScoresByUsername(username: string): MemoryScore[] {
+  return scores
+    .filter((row) => row.username === username)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getMemoryChallengeScoresByUsername(username: string): MemoryChallengeScore[] {
+  return challengeScores
+    .filter((row) => row.username === username)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function deleteMemoryScoresByUsername(username: string): void {
+  for (let index = scores.length - 1; index >= 0; index -= 1) {
+    if (scores[index]?.username === username) {
+      scores.splice(index, 1);
+    }
+  }
+}
+
+export function deleteMemoryChallengeScoresByUsername(username: string): void {
+  for (let index = challengeScores.length - 1; index >= 0; index -= 1) {
+    if (challengeScores[index]?.username === username) {
+      challengeScores.splice(index, 1);
+    }
+  }
 }
 
 function parseIsoDate(date: string): number {

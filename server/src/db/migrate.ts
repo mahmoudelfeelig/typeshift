@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS account_sessions (
+  id UUID PRIMARY KEY,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL CHECK (char_length(label) BETWEEN 2 AND 80),
+  user_agent_hash TEXT NOT NULL,
+  ip_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS account_preferences (
   account_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
   preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -188,6 +200,8 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_handle_normalized ON accounts(handle_normalized);
+CREATE INDEX IF NOT EXISTS idx_account_sessions_account_id ON account_sessions(account_id, revoked_at, expires_at DESC);
+CREATE INDEX IF NOT EXISTS idx_account_sessions_expires_at ON account_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_friend_requests_to ON account_friend_requests(to_account_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_friend_requests_from ON account_friend_requests(from_account_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_shared_replays_public ON shared_replays(is_public, created_at DESC);

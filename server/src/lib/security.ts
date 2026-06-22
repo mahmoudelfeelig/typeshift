@@ -17,6 +17,7 @@ interface SessionTokenPayload {
 interface AccountTokenPayload {
   aid: string;
   handle: string;
+  sid: string;
 }
 
 export function hashClientValue(input: string): string {
@@ -74,8 +75,8 @@ export function verifySessionToken(token: string): SessionTokenPayload | null {
   }
 }
 
-export function signAccountToken(accountId: string, handle: string): string {
-  return jwt.sign({ aid: accountId, handle }, config.JWT_SESSION_SECRET, {
+export function signAccountToken(sessionId: string, accountId: string, handle: string): string {
+  return jwt.sign({ aid: accountId, handle, sid: sessionId }, config.JWT_SESSION_SECRET, {
     algorithm: JWT_ALGORITHM,
     issuer: TOKEN_ISSUER,
     audience: ACCOUNT_TOKEN_AUDIENCE,
@@ -90,7 +91,7 @@ export function verifyAccountToken(token: string): AccountTokenPayload | null {
       issuer: TOKEN_ISSUER,
       audience: ACCOUNT_TOKEN_AUDIENCE,
     }) as AccountTokenPayload;
-    if (!payload.aid || !payload.handle) {
+    if (!payload.aid || !payload.handle || !payload.sid) {
       return null;
     }
     return payload;
