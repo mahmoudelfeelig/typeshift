@@ -188,6 +188,15 @@ export interface AccountProfile {
   sessionTtlMs?: number;
 }
 
+export interface AccountSessionEntry {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  isCurrent: boolean;
+}
+
 export interface FriendListResponse {
   friends: Array<{ id: string; handle: string; rating: number }>;
   incoming: Array<{ requestId: string; fromAccountId: string; fromHandle: string; createdAt: string }>;
@@ -693,6 +702,7 @@ export async function registerAccount(input: {
   handle: string;
   password: string;
   locale?: string;
+  turnstileToken?: string;
 }): Promise<{ token: string; account: AccountProfile }> {
   const response = await fetch("/api/v1/account/register", {
     method: "POST",
@@ -705,6 +715,7 @@ export async function registerAccount(input: {
 export async function loginAccount(input: {
   handle: string;
   password: string;
+  turnstileToken?: string;
 }): Promise<{ token: string; account: AccountProfile }> {
   const response = await fetch("/api/v1/account/login", {
     method: "POST",
@@ -734,6 +745,75 @@ export async function updateAccountPreferences(
     body: JSON.stringify({ preferences }),
   });
   return parseJson<{ ok: true; preferences: Record<string, unknown> }>(response);
+}
+
+export async function changeAccountPassword(
+  token: string,
+  input: { currentPassword: string; newPassword: string },
+): Promise<{ ok: true }> {
+  const response = await fetch("/api/v1/account/password", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(input),
+  });
+  return parseJson<{ ok: true }>(response);
+}
+
+export async function fetchAccountSessions(
+  token: string,
+): Promise<{ currentSessionId: string; sessions: AccountSessionEntry[] }> {
+  const response = await fetch("/api/v1/account/sessions", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<{ currentSessionId: string; sessions: AccountSessionEntry[] }>(response);
+}
+
+export async function revokeAccountSession(
+  token: string,
+  sessionId: string,
+): Promise<{ ok: true; currentSessionRevoked: boolean }> {
+  const response = await fetch(`/api/v1/account/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<{ ok: true; currentSessionRevoked: boolean }>(response);
+}
+
+export async function logoutCurrentAccount(token: string): Promise<{ ok: true }> {
+  const response = await fetch("/api/v1/account/logout", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+  return parseJson<{ ok: true }>(response);
+}
+
+export async function logoutOtherAccountSessions(token: string): Promise<{ ok: true }> {
+  const response = await fetch("/api/v1/account/logout-others", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({}),
+  });
+  return parseJson<{ ok: true }>(response);
+}
+
+export async function exportAccountData(token: string): Promise<Record<string, unknown>> {
+  const response = await fetch("/api/v1/account/export", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<Record<string, unknown>>(response);
+}
+
+export async function deleteAccount(
+  token: string,
+  confirmHandle: string,
+): Promise<{ ok: true; deleted: boolean }> {
+  const response = await fetch("/api/v1/account", {
+    method: "DELETE",
+    headers: authHeaders(token),
+    body: JSON.stringify({ confirmHandle }),
+  });
+  return parseJson<{ ok: true; deleted: boolean }>(response);
 }
 
 export async function requestFriend(token: string, handle: string): Promise<{
@@ -875,9 +955,10 @@ export async function listReplayShares(input: {
   if (input.mine) {
     query.set("mine", "true");
   }
-  const response = await fetch(`/api/v1/replay/share?${query.toString()}`, {
-    headers: input.token ? { Authorization: `Bearer ${input.token}` } : undefined,
-  });
+  const init: RequestInit = input.token
+    ? { headers: { Authorization: `Bearer ${input.token}` } }
+    : {};
+  const response = await fetch(`/api/v1/replay/share?${query.toString()}`, init);
   return parseJson<{ entries: ReplayShareEntry[] }>(response);
 }
 
