@@ -4,14 +4,21 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import BrandLogo from "./components/BrandLogo";
+import SiteFooter from "./components/SiteFooter";
+import TurnstileWidget from "./components/TurnstileWidget";
 import {
   createWebhook,
   createRaceRoom,
   createTournament,
+  changeAccountPassword,
   deleteWebhook,
+  deleteAccount,
   enqueueCasualDuel,
   enqueueRanked,
+  exportAccountData,
   fetchAccountProfile,
+  fetchAccountSessions,
   fetchAnalyticsSummary,
   fetchChallengeLeaderboard,
   fetchCurrentSeason,
@@ -31,7 +38,10 @@ import {
   listReplayShares,
   listWebhooks,
   loginAccount,
+  logoutCurrentAccount,
+  logoutOtherAccountSessions,
   registerAccount,
+  revokeAccountSession,
   reportTournamentMatch,
   requestFriend,
   respondFriend,
@@ -46,6 +56,7 @@ import {
   updateRaceProgress,
   ApiError,
   type AccountProfile,
+  type AccountSessionEntry,
   type AnalyticsSummaryResponse,
   type ChallengeLeaderboardEntry,
   type DailyChallenge,
@@ -67,6 +78,8 @@ import {
   splitCustomWords,
   type DictionaryPack,
 } from "./lib/dictionary";
+import { chooseMeteorTarget } from "./lib/meteor-targeting";
+import { GAME_MODES, MODE_DETAILS, MODE_META, modeFromSlug, pathForMode } from "./lib/game-modes";
 
 const STORAGE_CUSTOM = "typeshift.customWords";
 const STORAGE_BEST = "typeshift.bestByMode";
@@ -105,143 +118,12 @@ const CODE_SNIPPETS = [
   "type LeaderboardRow = { handle: string; wpm: number; acc: number };",
 ];
 
-const MODE_META: Record<Mode, { label: string; flavor: string; timed: boolean }> = {
-  time: {
-    label: "Sprint",
-    flavor: "Timed word run.",
-    timed: true,
-  },
-  quote: {
-    label: "Quote",
-    flavor: "Finish one full line.",
-    timed: false,
-  },
-  meteor: {
-    label: "Meteor",
-    flavor: "First letter locks nearest word.",
-    timed: true,
-  },
-  zen: {
-    label: "Flow",
-    flavor: "No timer, endless words.",
-    timed: false,
-  },
-  pulse: {
-    label: "Pulse",
-    flavor: "Beat-timed scoring lane.",
-    timed: true,
-  },
-  relay: {
-    label: "Relay",
-    flavor: "Mistakes push you backward.",
-    timed: true,
-  },
-  cipher: {
-    label: "Cipher",
-    flavor: "Global shift decode mode.",
-    timed: true,
-  },
-  drift: {
-    label: "Drift",
-    flavor: "Words drift side-to-side while you type.",
-    timed: true,
-  },
-  reverse: {
-    label: "Reverse",
-    flavor: "Reading order flips right-to-left.",
-    timed: true,
-  },
-  echo: {
-    label: "Echo",
-    flavor: "Type the previous word from memory.",
-    timed: true,
-  },
-  rogue: {
-    label: "Rogue",
-    flavor: "Pick run perks every few clears.",
-    timed: true,
-  },
-  duel: {
-    label: "Rhythm Duel",
-    flavor: "Beat-timed run vs rival pace.",
-    timed: true,
-  },
-  code: {
-    label: "Code",
-    flavor: "Type syntax-heavy programming words.",
-    timed: true,
-  },
-  coach: {
-    label: "Coach",
-    flavor: "Adaptive drills from your weak patterns.",
-    timed: true,
-  },
-  blackout: {
-    label: "Blackout",
-    flavor: "Typed letters fade; trust muscle memory.",
-    timed: true,
-  },
-  chain: {
-    label: "Chain",
-    flavor: "Combo multipliers on long clean streaks.",
-    timed: true,
-  },
-  gravity: {
-    label: "Gravity Flip",
-    flavor: "Flow direction flips with time pulses.",
-    timed: true,
-  },
-  coop: {
-    label: "Co-op Relay",
-    flavor: "Two pilots alternate each cleared word.",
-    timed: true,
-  },
-  infection: {
-    label: "Infection",
-    flavor: "Mistakes infect nearby words until cleaned.",
-    timed: true,
-  },
-  stealth: {
-    label: "Stealth",
-    flavor: "Only first and last letters stay visible.",
-    timed: true,
-  },
-  chart: {
-    label: "Rhythm Chart",
-    flavor: "Strict beatmap windows for each submit.",
-    timed: true,
-  },
-};
-
-const MODE_DETAILS: Record<Mode, string> = {
-  time: "A straight speed run. Clean rhythm and sustained focus matter more than gimmicks here.",
-  quote: "One complete passage with no timer pressure. Useful for endurance and punctuation control.",
-  meteor: "Your ship auto-locks the closest word with the typed opening letter. Each hit burns letters off the target.",
-  zen: "Endless practice with no clock. Good for warming up or drilling accuracy without pressure.",
-  pulse: "Every submit is judged against the beat. Better timing means cleaner bonus scoring.",
-  relay: "Mistakes kick you backward through the prompt. Strong for recovery discipline under pressure.",
-  cipher: "All words are shifted by the same amount. Decode fast and keep your pattern recognition sharp.",
-  drift: "Words slide while you read them. Tracks eye control and quick target reacquisition.",
-  reverse: "The reading direction flips. Good for breaking autopilot and forcing deliberate reads.",
-  echo: "Clear a word, then repeat the last one from memory. Strong for recall and sequencing.",
-  rogue: "Perks change the run every few clears. Higher variance, more aggressive pacing.",
-  duel: "A rhythm-forward race against rival pace. Keep the beat or lose ground.",
-  code: "Programming-heavy words and snippets. Good for syntax accuracy and symbol handling.",
-  coach: "Weights words toward patterns you miss. Best mode for targeted improvement.",
-  blackout: "Letters fade under your hands. Forces trust in muscle memory.",
-  chain: "Long clean streaks stack combo value. Rewards consistency.",
-  gravity: "The lane flow flips on a timer. Strong for reset speed and attention shifting.",
-  coop: "Alternating turns create a relay cadence. Good for handoff rhythm and recovery.",
-  infection: "Mistakes spread pressure into nearby words. Clean up quickly or the lane gets messy.",
-  stealth: "Middle letters vanish. Focus on shape, memory, and word skeletons.",
-  chart: "The strictest rhythm mode. Smaller hit windows, stronger precision demand.",
-};
-
 export type AppRoute = "home" | "play" | "social" | "boards" | "lab" | "profile" | "privacy" | "settings";
+type ProfileSubroute = "overview" | "account" | "social" | "sharing";
 
 const ROUTE_LABELS: Record<AppRoute, string> = {
   home: "Home",
-  play: "Play",
+  play: "Games",
   social: "Social",
   boards: "Boards",
   lab: "Lab",
@@ -262,12 +144,12 @@ const ROUTE_COPY: Record<AppRoute, { title: string; subtitle: string }> = {
     subtitle: "Home dashboard with quick launch, profile snapshot, and active ladders.",
   },
   play: {
-    title: "Play Deck",
-    subtitle: "Pick a mode, read the rundown, and launch the run from one place.",
+    title: "Games",
+    subtitle: "Choose a game, then play it without sidebars or unrelated controls.",
   },
   social: {
     title: "Social Hub",
-    subtitle: "Create race rooms, join friends, or run tournaments.",
+    subtitle: "Create race rooms, run brackets, queue duels, and manage friends on the Worker API.",
   },
   boards: {
     title: "Rank Boards",
@@ -279,7 +161,7 @@ const ROUTE_COPY: Record<AppRoute, { title: string; subtitle: string }> = {
   },
   profile: {
     title: "Pilot Profile",
-    subtitle: "Account sync, friends, ranked queue, duel state, replay shares, and webhooks.",
+    subtitle: "Account sync, sessions, friends, replay sharing, duel queues, and webhook endpoints.",
   },
   privacy: {
     title: "Privacy Desk",
@@ -298,15 +180,63 @@ function routeFromPathname(pathname: string): AppRoute {
   if (normalized === "/social") return "social";
   if (normalized === "/boards") return "boards";
   if (normalized === "/lab") return "lab";
-  if (normalized === "/profile") return "profile";
+  if (normalized === "/profile" || normalized.startsWith("/profile/")) return "profile";
   if (normalized === "/privacy") return "privacy";
   if (normalized === "/settings") return "settings";
-  if (normalized === "/play") return "play";
+  if (normalized === "/play" || normalized === "/games" || normalized.startsWith("/games/")) return "play";
   return "home";
 }
 
 function pathForRoute(route: AppRoute): string {
-  return route === "home" ? "/" : `/${route}`;
+  if (route === "home") return "/";
+  if (route === "play") return "/games";
+  return `/${route}`;
+}
+
+const MODE_GLYPHS: Record<Mode, string> = {
+  time: "↗",
+  quote: "“",
+  meteor: "●",
+  zen: "≈",
+  pulse: "⌁",
+  relay: "↔",
+  cipher: "⌘",
+  drift: "⋯",
+  reverse: "←",
+  echo: "))",
+  rogue: "◆",
+  duel: "×",
+  code: "</>",
+  coach: "!",
+  blackout: "◐",
+  chain: "∞",
+  gravity: "↕",
+  coop: "+",
+  infection: "✣",
+  stealth: "◒",
+  chart: "▥",
+};
+
+function modeFromPathname(pathname: string): Mode | null {
+  const normalized = pathname.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+  const [, section, slug] = normalized.split("/");
+  if (section !== "games" || !slug) {
+    return null;
+  }
+  return modeFromSlug(slug);
+}
+
+function profileSubrouteFromPathname(pathname: string): ProfileSubroute {
+  const normalized = pathname.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+  if (normalized === "/profile/account") return "account";
+  if (normalized === "/profile/social") return "social";
+  if (normalized === "/profile/sharing") return "sharing";
+  return "overview";
+}
+
+function pathForProfileSubroute(route: ProfileSubroute): string {
+  if (route === "overview") return "/profile";
+  return `/profile/${route}`;
 }
 
 function viewportBucket(width: number): "sm" | "md" | "lg" | "xl" {
@@ -776,6 +706,11 @@ export default function App() {
   const router = useRouter();
   const pathname = usePathname();
   const isDevEnvironment = process.env.NODE_ENV !== "production";
+  const liveSocialEnabled = process.env.NEXT_PUBLIC_SOCIAL_LIVE_ENABLED !== "false";
+  const cloudflareOnly = process.env.NEXT_PUBLIC_CLOUDFLARE_ONLY === "true";
+  const turnstileSiteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "";
+  const socialLaunchNote =
+    "Live social systems are disabled by NEXT_PUBLIC_SOCIAL_LIVE_ENABLED for this environment.";
   const arenaRef = useRef<HTMLElement | null>(null);
   const previewRafRef = useRef(0);
   const replayImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -789,6 +724,7 @@ export default function App() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const musicLoopRef = useRef<number>(0);
   const musicStepRef = useRef(0);
+  const adaptiveMusicRef = useRef({ wpm: 0, accuracy: 100, streak: 0, bpm: 84 });
   const pulseJudgeTimeoutRef = useRef(0);
   const runSamplesRef = useRef<Array<{ t: number; words: number; chars: number }>>([]);
   const keyEventsRef = useRef<ReplayEvent[]>([]);
@@ -831,7 +767,7 @@ export default function App() {
     sessionToken: null,
   });
 
-  const [mode, setMode] = useState<Mode>("time");
+  const [mode, setMode] = useState<Mode>(() => modeFromPathname(pathname || "/") ?? "time");
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
       const consent = readStoredPrivacyConsent();
@@ -976,14 +912,22 @@ export default function App() {
   const [analyticsSummaryTotals, setAnalyticsSummaryTotals] = useState<Record<string, number>>({});
   const [analyticsSummaryLoading, setAnalyticsSummaryLoading] = useState(false);
   const [analyticsSummaryError, setAnalyticsSummaryError] = useState<string | null>(null);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
 
   const [accountToken, setAccountToken] = useState<string>("");
   const [accountProfile, setAccountProfile] = useState<AccountProfile | null>(null);
   const [accountPrefs, setAccountPrefs] = useState<Record<string, unknown>>({});
   const [authHandle, setAuthHandle] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authNewPassword, setAuthNewPassword] = useState("");
   const [authLocale, setAuthLocale] = useState("en");
+  const [authTurnstileToken, setAuthTurnstileToken] = useState("");
+  const [authTurnstileResetKey, setAuthTurnstileResetKey] = useState(0);
   const [authNote, setAuthNote] = useState<string | null>(null);
+  const [accountSessions, setAccountSessions] = useState<AccountSessionEntry[]>([]);
+  const [accountSessionId, setAccountSessionId] = useState("");
+  const [deleteHandleConfirm, setDeleteHandleConfirm] = useState("");
+  const [accountLifecycleNote, setAccountLifecycleNote] = useState<string | null>(null);
   const [friendHandle, setFriendHandle] = useState("");
   const [friends, setFriends] = useState<FriendListResponse>({
     friends: [],
@@ -1295,7 +1239,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setAppRoute(routeFromPathname(pathname || "/"));
+    const currentPath = pathname || "/";
+    setAppRoute(routeFromPathname(currentPath));
+    const routeMode = modeFromPathname(currentPath);
+    if (routeMode) {
+      setMode(routeMode);
+      setModePreview(routeMode);
+    }
   }, [pathname]);
 
   useEffect(() => {
@@ -1357,7 +1307,7 @@ export default function App() {
 
   useEffect(() => {
     setAccountPrefs((prev) => {
-      const next = { ...prev, privacyConsent };
+      const next: Record<string, unknown> = { ...prev, privacyConsent };
       if (canStoreComfortPrefs) {
         return {
           ...next,
@@ -1658,7 +1608,7 @@ export default function App() {
     sendPrivacyAnalytics({
       event,
       page: options?.page ?? appRoute,
-      mode: options?.mode,
+      ...(options?.mode ? { mode: options.mode } : {}),
       theme,
       consentVersion: PRIVACY_CONSENT_VERSION,
       telemetry: {
@@ -1744,7 +1694,7 @@ export default function App() {
   }, [mode, certifiedRun]);
 
   useEffect(() => {
-    trackPrivacyEvent("page_view", { page: appRoute, mode: appRoute === "play" ? mode : undefined });
+    trackPrivacyEvent("page_view", appRoute === "play" ? { page: appRoute, mode } : { page: appRoute });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appRoute]);
 
@@ -1809,8 +1759,9 @@ export default function App() {
     setAnalyticsSummaryLoading(true);
     setAnalyticsSummaryError(null);
     try {
+      const token = analyticsAdminToken.trim();
       const payload: AnalyticsSummaryResponse = await fetchAnalyticsSummary({
-        token: analyticsAdminToken.trim() || undefined,
+        ...(token ? { token } : {}),
         days: 14,
       });
       setAnalyticsSummaryRows(payload.rows);
@@ -1830,25 +1781,39 @@ export default function App() {
       setFriends({ friends: [], incoming: [], outgoing: [] });
       setActiveDuel(null);
       setRankedStatus("idle");
+      setWebhooks([]);
       return;
     }
     void refreshAccountProfile(accountToken);
+    void refreshReplayShares();
+    void refreshAccountSessions();
+    if (!liveSocialEnabled) {
+      setFriends({ friends: [], incoming: [], outgoing: [] });
+      setActiveDuel(null);
+      setRankedStatus("idle");
+      setWebhooks([]);
+      return;
+    }
     void refreshFriends();
     void refreshRankedStatus();
-    void refreshReplayShares();
     void refreshWebhooks();
     const id = window.setInterval(() => {
       void refreshFriends();
       void refreshRankedStatus();
       void refreshDuelState();
+      void refreshAccountSessions();
     }, 3000);
     return () => {
       window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountToken]);
+  }, [accountToken, liveSocialEnabled]);
 
   useEffect(() => {
+    if (!liveSocialEnabled) {
+      setRaceState(null);
+      return;
+    }
     if (!raceRoomId) {
       setRaceState(null);
       return;
@@ -1872,9 +1837,13 @@ export default function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [raceRoomId]);
+  }, [liveSocialEnabled, raceRoomId]);
 
   async function createRace(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setRaceError(socialLaunchNote);
+      return;
+    }
     try {
       const result = await createRaceRoom(mode, raceName.trim() || "Pilot");
       setRaceRoomId(result.roomId);
@@ -1889,6 +1858,10 @@ export default function App() {
   }
 
   async function joinRace(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setRaceError(socialLaunchNote);
+      return;
+    }
     try {
       const result = await joinRaceRoom(raceRoomInput, raceName.trim() || "Pilot");
       setRaceRoomId(result.roomId);
@@ -1906,6 +1879,10 @@ export default function App() {
     if (!raceRoomId || !racePlayerId) {
       return;
     }
+    if (!liveSocialEnabled) {
+      setRaceError(socialLaunchNote);
+      return;
+    }
     try {
       const room = await startRaceRoom(raceRoomId, racePlayerId);
       setRaceState(room);
@@ -1917,6 +1894,10 @@ export default function App() {
   }
 
   async function createBracket(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setTournamentError(socialLaunchNote);
+      return;
+    }
     try {
       const entrants = tournamentEntrantsInput
         .split(/\r?\n/)
@@ -1937,6 +1918,10 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!liveSocialEnabled) {
+      setTournamentState(null);
+      return;
+    }
     const targetId = tournamentLookupId || tournamentState?.id;
     if (!targetId) {
       return;
@@ -1960,10 +1945,14 @@ export default function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [tournamentLookupId, tournamentState?.id]);
+  }, [liveSocialEnabled, tournamentLookupId, tournamentState?.id]);
 
   async function markMatchWinner(matchId: string, winnerId: string): Promise<void> {
     if (!tournamentState) {
+      return;
+    }
+    if (!liveSocialEnabled) {
+      setTournamentError(socialLaunchNote);
       return;
     }
     try {
@@ -2024,10 +2013,13 @@ export default function App() {
                   : prev.musicEnabled,
               sfxVolume: clamp(Number(remoteFocusPrefs.sfxVolume ?? prev.sfxVolume), 0, 1),
               musicVolume: clamp(Number(remoteFocusPrefs.musicVolume ?? prev.musicVolume), 0, 1),
-              statVisibility: {
-                ...DEFAULT_FOCUS_STAT_VISIBILITY,
-                ...(asRecord(remoteFocusPrefs.statVisibility) ?? prev.statVisibility),
-              },
+              statVisibility: Object.fromEntries(
+                Object.entries({
+                  ...DEFAULT_FOCUS_STAT_VISIBILITY,
+                  ...prev.statVisibility,
+                  ...(asRecord(remoteFocusPrefs.statVisibility) ?? {}),
+                }).map(([key, value]) => [key, value === true]),
+              ),
             }));
           }
           if (prefs.theme === "dark" || prefs.theme === "light") {
@@ -2075,11 +2067,16 @@ export default function App() {
       setAuthNote("Password must be at least 10 chars with uppercase, lowercase, and a number.");
       return;
     }
+    if (turnstileSiteKey && !authTurnstileToken) {
+      setAuthNote("Complete the anti-bot check before registering.");
+      return;
+    }
     try {
       const payload = await registerAccount({
         handle,
         password: authPassword,
         locale: authLocale,
+        ...(authTurnstileToken ? { turnstileToken: authTurnstileToken } : {}),
       });
       setAccountToken(payload.token);
       setAccountProfile(payload.account);
@@ -2089,6 +2086,11 @@ export default function App() {
       await refreshAccountProfile(payload.token);
     } catch (error) {
       setAuthNote((error as Error).message);
+    } finally {
+      if (turnstileSiteKey) {
+        setAuthTurnstileToken("");
+        setAuthTurnstileResetKey((value) => value + 1);
+      }
     }
   }
 
@@ -2102,10 +2104,15 @@ export default function App() {
       setAuthNote("Password is required.");
       return;
     }
+    if (turnstileSiteKey && !authTurnstileToken) {
+      setAuthNote("Complete the anti-bot check before logging in.");
+      return;
+    }
     try {
       const payload = await loginAccount({
         handle,
         password: authPassword,
+        ...(authTurnstileToken ? { turnstileToken: authTurnstileToken } : {}),
       });
       setAccountToken(payload.token);
       setAccountProfile(payload.account);
@@ -2115,10 +2122,142 @@ export default function App() {
       await refreshAccountProfile(payload.token);
     } catch (error) {
       setAuthNote((error as Error).message);
+    } finally {
+      if (turnstileSiteKey) {
+        setAuthTurnstileToken("");
+        setAuthTurnstileResetKey((value) => value + 1);
+      }
     }
   }
 
+  async function refreshAccountSessions(): Promise<void> {
+    if (!accountToken) return;
+    try {
+      const payload = await fetchAccountSessions(accountToken);
+      setAccountSessionId(payload.currentSessionId);
+      setAccountSessions(payload.sessions);
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  async function changePasswordFlow(): Promise<void> {
+    if (!accountToken) return;
+    if (!authPassword) {
+      setAccountLifecycleNote("Current password is required.");
+      return;
+    }
+    if (!passwordLooksValid(authNewPassword)) {
+      setAccountLifecycleNote("New password must be at least 10 chars with uppercase, lowercase, and a number.");
+      return;
+    }
+    try {
+      await changeAccountPassword(accountToken, {
+        currentPassword: authPassword,
+        newPassword: authNewPassword,
+      });
+      setAuthPassword("");
+      setAuthNewPassword("");
+      setAccountLifecycleNote("Password updated. Other active sessions were signed out.");
+      await refreshAccountSessions();
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  async function exportAccountDataFlow(): Promise<void> {
+    if (!accountToken) return;
+    try {
+      const payload = await exportAccountData(accountToken);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `typeshift-account-export-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setAccountLifecycleNote("Account export downloaded.");
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  async function logoutCurrentAccountFlow(): Promise<void> {
+    if (!accountToken) return;
+    try {
+      await logoutCurrentAccount(accountToken);
+    } catch (_error) {
+      // local logout should still proceed
+    }
+    setAccountToken("");
+    setAccountProfile(null);
+    setAccountSessions([]);
+    setAccountLifecycleNote("Signed out.");
+  }
+
+  async function logoutOtherSessionsFlow(): Promise<void> {
+    if (!accountToken) return;
+    try {
+      await logoutOtherAccountSessions(accountToken);
+      setAccountLifecycleNote("Other active sessions were signed out.");
+      await refreshAccountSessions();
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  async function revokeSessionFlow(sessionId: string): Promise<void> {
+    if (!accountToken) return;
+    try {
+      const payload = await revokeAccountSession(accountToken, sessionId);
+      if (payload.currentSessionRevoked) {
+        setAccountToken("");
+        setAccountProfile(null);
+        setAccountSessions([]);
+        setAccountLifecycleNote("Current session signed out.");
+        return;
+      }
+      setAccountLifecycleNote("Session removed.");
+      await refreshAccountSessions();
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  async function deleteAccountFlow(): Promise<void> {
+    if (!accountToken || !accountProfile) return;
+    if (deleteHandleConfirm.trim() !== accountProfile.handle) {
+      setAccountLifecycleNote("Type your exact handle to confirm deletion.");
+      return;
+    }
+    try {
+      await deleteAccount(accountToken, deleteHandleConfirm.trim());
+      setAccountToken("");
+      setAccountProfile(null);
+      setAccountSessions([]);
+      setDeleteHandleConfirm("");
+      setDeleteModalOpen(false);
+      setAccountLifecycleNote("Account deleted.");
+    } catch (error) {
+      setAccountLifecycleNote((error as Error).message);
+    }
+  }
+
+  function openDeleteModal(): void {
+    setDeleteHandleConfirm("");
+    setDeleteModalOpen(true);
+  }
+
+  function closeDeleteModal(): void {
+    setDeleteModalOpen(false);
+    setDeleteHandleConfirm("");
+  }
+
   async function refreshFriends(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setFriends({ friends: [], incoming: [], outgoing: [] });
+      return;
+    }
     if (!accountToken) return;
     try {
       const payload = await fetchFriends(accountToken);
@@ -2130,6 +2269,10 @@ export default function App() {
 
   async function sendFriendRequest(): Promise<void> {
     if (!accountToken || !friendHandle.trim()) return;
+    if (!liveSocialEnabled) {
+      setAuthNote(socialLaunchNote);
+      return;
+    }
     try {
       await requestFriend(accountToken, friendHandle.trim());
       setFriendHandle("");
@@ -2141,6 +2284,10 @@ export default function App() {
 
   async function respondFriendRequest(requestId: string, accept: boolean): Promise<void> {
     if (!accountToken) return;
+    if (!liveSocialEnabled) {
+      setAuthNote(socialLaunchNote);
+      return;
+    }
     try {
       await respondFriend(accountToken, requestId, accept);
       await refreshFriends();
@@ -2151,6 +2298,10 @@ export default function App() {
 
   async function enqueueRankedFlow(): Promise<void> {
     if (!accountToken) return;
+    if (!liveSocialEnabled) {
+      setDuelNote(socialLaunchNote);
+      return;
+    }
     try {
       const result = await enqueueRanked(accountToken);
       setRankedStatus(result.status);
@@ -2164,6 +2315,10 @@ export default function App() {
 
   async function enqueueDuelFlow(): Promise<void> {
     if (!accountToken) return;
+    if (!liveSocialEnabled) {
+      setDuelNote(socialLaunchNote);
+      return;
+    }
     try {
       const result = await enqueueCasualDuel(accountToken);
       setRankedStatus(result.status);
@@ -2176,6 +2331,10 @@ export default function App() {
   }
 
   async function refreshRankedStatus(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setRankedStatus("idle");
+      return;
+    }
     if (!accountToken) return;
     try {
       const status = await fetchRankedStatus(accountToken);
@@ -2189,6 +2348,10 @@ export default function App() {
   }
 
   async function refreshDuelState(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setActiveDuel(null);
+      return;
+    }
     if (!accountToken || !activeDuel) return;
     try {
       const payload = await fetchDuelState(accountToken, activeDuel.id);
@@ -2199,6 +2362,9 @@ export default function App() {
   }
 
   async function pushDuelProgress(finished = false): Promise<void> {
+    if (!liveSocialEnabled) {
+      return;
+    }
     if (!accountToken || !activeDuel) return;
     try {
       const payload = await updateDuelState(accountToken, {
@@ -2222,9 +2388,13 @@ export default function App() {
       setReplayNote("No replay to share.");
       return;
     }
+    if (!accountToken) {
+      setReplayNote("Sign in to publish replay shares on the Cloudflare launch.");
+      return;
+    }
     try {
       const payload = await shareReplay({
-        token: accountToken || undefined,
+        token: accountToken,
         mode: source.mode,
         title: replayShareTitle.trim() || "Shared run",
         replay: source as unknown as Record<string, unknown>,
@@ -2259,7 +2429,7 @@ export default function App() {
     try {
       const payload = await listReplayShares({
         mine: Boolean(accountToken),
-        token: accountToken || undefined,
+        ...(accountToken ? { token: accountToken } : {}),
       });
       setReplayShares(payload.entries);
     } catch (_error) {
@@ -2268,6 +2438,10 @@ export default function App() {
   }
 
   async function refreshWebhooks(): Promise<void> {
+    if (!liveSocialEnabled) {
+      setWebhooks([]);
+      return;
+    }
     if (!accountToken) {
       setWebhooks([]);
       return;
@@ -2282,6 +2456,10 @@ export default function App() {
 
   async function createWebhookFlow(): Promise<void> {
     if (!accountToken || !webhookUrl.trim()) return;
+    if (!liveSocialEnabled) {
+      setAuthNote(socialLaunchNote);
+      return;
+    }
     try {
       const created = await createWebhook(
         accountToken,
@@ -2301,6 +2479,10 @@ export default function App() {
 
   async function deleteWebhookFlow(id: string): Promise<void> {
     if (!accountToken) return;
+    if (!liveSocialEnabled) {
+      setAuthNote(socialLaunchNote);
+      return;
+    }
     try {
       await deleteWebhook(accountToken, id);
       await refreshWebhooks();
@@ -2311,6 +2493,10 @@ export default function App() {
 
   async function testWebhookFlow(id: string): Promise<void> {
     if (!accountToken) return;
+    if (!liveSocialEnabled) {
+      setAuthNote(socialLaunchNote);
+      return;
+    }
     try {
       await testWebhook(accountToken, id);
       setAuthNote("Webhook test sent.");
@@ -2385,7 +2571,7 @@ export default function App() {
     const cpm = (runtime.rawChars / summary.elapsedSec) * 60;
     const kps = runtime.rawChars / summary.elapsedSec;
     const efficiency = runtime.rawChars > 0 ? (runtime.correctChars / runtime.rawChars) * 100 : 100;
-    setStats({
+    const nextStats = {
       wpm: summary.wpm,
       raw: summary.raw,
       cpm,
@@ -2400,7 +2586,14 @@ export default function App() {
       correctChars: runtime.correctChars,
       wrongChars: runtime.wrongChars,
       lives: runtime.lives,
-    });
+    };
+    adaptiveMusicRef.current = {
+      wpm: summary.wpm,
+      accuracy: summary.accuracy,
+      streak: runtime.streak,
+      bpm: clamp(Math.round(82 + summary.wpm * 0.62 + Math.min(runtime.streak, 30) * 0.35), 82, 176),
+    };
+    setStats(nextStats);
   }
 
   function showPulseJudge(label: string, tone: PulseJudgeTone) {
@@ -2645,27 +2838,32 @@ export default function App() {
       musicLoopRef.current = 0;
     }
     musicStepRef.current = 0;
-    const profile = musicProfileForMode(mode);
     const tick = () => {
       if (runtimeRef.current.status !== "running") {
         return;
       }
+      const profile = musicProfileForMode(mode);
+      const adaptive = adaptiveMusicRef.current;
       const step = musicStepRef.current++;
       const now = ctx.currentTime + 0.02;
-      const leadFreq = profile.lead[step % profile.lead.length] ?? profile.lead[0] ?? 261.63;
-      const bassFreq = profile.bass[Math.floor(step / 2) % profile.bass.length] ?? profile.bass[0] ?? 98;
+      const variation = Math.floor(step / 16) % 3;
+      const leadIndex = (step + variation * 2 + (adaptive.accuracy < 92 ? 1 : 0)) % profile.lead.length;
+      const leadFreq = profile.lead[leadIndex] ?? profile.lead[0] ?? 261.63;
+      const bassFreq = profile.bass[(Math.floor(step / 2) + variation) % profile.bass.length] ?? profile.bass[0] ?? 98;
+      const intervalMs = Math.round((60_000 / adaptive.bpm) / 2);
+      const intensity = clamp(0.65 + adaptive.wpm / 220, 0.65, 1.35);
       playMusicTone(ctx, {
         frequency: leadFreq,
-        durationSec: profile.intervalMs / 1000,
-        volume: mode === "meteor" ? 0.055 : 0.04,
+        durationSec: intervalMs / 1000,
+        volume: (mode === "meteor" ? 0.045 : 0.032) * intensity,
         type: profile.leadType,
         startAt: now,
       });
       if (step % 2 === 0) {
         playMusicTone(ctx, {
           frequency: bassFreq,
-          durationSec: (profile.intervalMs / 1000) * 1.8,
-          volume: mode === "meteor" ? 0.05 : 0.032,
+          durationSec: (intervalMs / 1000) * 1.8,
+          volume: (mode === "meteor" ? 0.042 : 0.026) * intensity,
           type: "sine",
           startAt: now,
         });
@@ -2679,9 +2877,18 @@ export default function App() {
           startAt: now,
         });
       }
+      if (adaptive.streak >= 8 && step % 4 === 3) {
+        playMusicTone(ctx, {
+          frequency: leadFreq * (adaptive.accuracy >= 96 ? 1.5 : 1.25),
+          durationSec: 0.055,
+          volume: 0.012 * intensity,
+          type: profile.accentType,
+          startAt: now,
+        });
+      }
+      musicLoopRef.current = window.setTimeout(tick, intervalMs);
     };
     tick();
-    musicLoopRef.current = window.setInterval(tick, profile.intervalMs);
   }
 
   function playLaserSfx() {
@@ -3022,7 +3229,7 @@ export default function App() {
     }
 
     if (mode === "quote") {
-      let quote = QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? QUOTES[0];
+      let quote = QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? "Calm typing beats rushed typing every time.";
       if (!settings.punctuation) {
         quote = quote.replace(/[.,!?;:]/g, "");
       }
@@ -3060,13 +3267,7 @@ export default function App() {
 
   function scheduleTypedPreview(nextValue: string) {
     pendingPreviewRef.current = nextValue;
-    if (previewRafRef.current) {
-      return;
-    }
-    previewRafRef.current = requestAnimationFrame(() => {
-      previewRafRef.current = 0;
-      setTypedPreview(pendingPreviewRef.current);
-    });
+    setTypedPreview(nextValue);
   }
 
   function startHudLoop() {
@@ -3099,7 +3300,7 @@ export default function App() {
 
         const ghost = ghostRuns[mode];
         if (ghost && ghost.samples.length > 0) {
-          let nearest = ghost.samples[ghost.samples.length - 1];
+          let nearest = ghost.samples[ghost.samples.length - 1] ?? ghost.samples[0]!;
           for (const sample of ghost.samples) {
             if (sample.t >= elapsed) {
               nearest = sample;
@@ -3285,6 +3486,18 @@ export default function App() {
       });
     }
     void pushDuelProgress(false);
+  }
+
+  function toggleSession() {
+    const runtime = runtimeRef.current;
+    if (runtime.status === "running") {
+      endSession("Stopped");
+      return;
+    }
+    if (runtime.status === "finished") {
+      resetSession(true);
+    }
+    startSession();
   }
 
   function endSession(reason: string) {
@@ -3707,6 +3920,9 @@ export default function App() {
         const index = runtime.meteorWords.findIndex((word) => word.id === runtime.meteorLockId);
         if (index >= 0) {
           const target = runtime.meteorWords[index];
+          if (!target) {
+            return;
+          }
           const chip = Math.min(runtime.meteorBuffer.length, target.text.length);
           const remaining = target.text.slice(chip);
           runtime.correctChars += chip;
@@ -3737,6 +3953,9 @@ export default function App() {
         runtime.meteorBuffer = runtime.meteorBuffer.slice(0, -1);
         if (runtime.meteorBuffer.length === 0) {
           runtime.meteorLockId = null;
+        } else {
+          const nextLock = chooseMeteorTarget(runtime.meteorWords, runtime.meteorBuffer, runtime.meteorLockId);
+          runtime.meteorLockId = nextLock?.id ?? null;
         }
         syncMeteorSelection();
         logReplayEvent("backspace", "Backspace", true);
@@ -3748,27 +3967,6 @@ export default function App() {
     if (!/^[a-zA-Z0-9.,!?;:]$/.test(event.key)) return;
 
     const inputChar = settings.lowercase ? event.key.toLowerCase() : event.key;
-    let lockWord = runtime.meteorLockId
-      ? runtime.meteorWords.find((word) => word.id === runtime.meteorLockId)
-      : undefined;
-
-    if (!lockWord) {
-      const first = inputChar.toLowerCase();
-      let candidate: MeteorWord | undefined;
-      for (const word of runtime.meteorWords) {
-        if ((word.text[0] ?? "").toLowerCase() !== first) {
-          continue;
-        }
-        if (!candidate || word.yPercent > candidate.yPercent) {
-          candidate = word;
-        }
-      }
-      if (!candidate) return;
-      runtime.meteorLockId = candidate.id;
-      runtime.meteorBuffer = "";
-      playLockSfx();
-      lockWord = candidate;
-    }
 
     if (runtime.status === "idle") {
       startSession();
@@ -3778,12 +3976,19 @@ export default function App() {
     noteKeyInterval();
     runtime.rawChars += 1;
 
-    const expected = lockWord.text[runtime.meteorBuffer.length];
-    if (expected && expected.toLowerCase() === inputChar.toLowerCase()) {
+    const nextBuffer = `${runtime.meteorBuffer}${inputChar}`;
+    const lockWord = chooseMeteorTarget(runtime.meteorWords, nextBuffer, runtime.meteorLockId);
+
+    if (lockWord) {
+      const switchedTarget = runtime.meteorLockId !== lockWord.id;
+      runtime.meteorLockId = lockWord.id;
+      if (switchedTarget) {
+        playLockSfx();
+      }
       bumpKeyStat(inputChar, true);
       logReplayEvent("key", inputChar, true);
       triggerLaser(lockWord);
-      runtime.meteorBuffer += inputChar;
+      runtime.meteorBuffer = nextBuffer;
       if (runtime.meteorBuffer.length >= lockWord.text.length) {
         runtime.correctChars += lockWord.text.length;
         runtime.completedWords += 1;
@@ -3812,7 +4017,7 @@ export default function App() {
 
   useEffect(() => {
     const listener = (event: globalThis.KeyboardEvent) => {
-      if (appRoute !== "play") {
+      if (appRoute !== "play" || !modeFromPathname(pathname || "/")) {
         return;
       }
       if (mode === "meteor") {
@@ -3825,7 +4030,7 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", listener);
     };
-  }, [appRoute, mode, settings.lowercase, pulseBpm, focusPrefs.sfxEnabled, rogueOffer, soundPack]);
+  }, [appRoute, mode, pathname, settings.lowercase, pulseBpm, focusPrefs.sfxEnabled, rogueOffer, soundPack]);
 
   function saveCustomDictionary() {
     const words = splitCustomWords(customInput);
@@ -4125,6 +4330,7 @@ export default function App() {
     [focusPrefs.statVisibility, statCards],
   );
   const previewMode = modePreview ?? mode;
+  const profileSubroute = profileSubrouteFromPathname(pathname || "/");
   const runIndicatorCards = [
     { key: "mode", label: "Mode", value: MODE_META[mode].label },
     { key: "pack", label: "Pack", value: dictionaryPack.toUpperCase() },
@@ -4141,7 +4347,7 @@ export default function App() {
             : phase,
     },
   ];
-  const playModeCards = (Object.keys(MODE_META) as Mode[]).map((modeId) => ({
+  const playModeCards = GAME_MODES.map((modeId) => ({
     id: modeId,
     label: MODE_META[modeId].label,
     flavor: MODE_META[modeId].flavor,
@@ -4149,14 +4355,15 @@ export default function App() {
     best: (bestByMode[modeId] ?? 0).toFixed(1),
   }));
 
-  const showDistrictStack = appRoute === "play" || appRoute === "settings";
-  const showArena = appRoute === "play";
+  const selectedGameMode = modeFromPathname(pathname || "/");
+  const showDistrictStack = appRoute === "settings";
+  const showArena = appRoute === "play" && selectedGameMode !== null;
   const atlasLayoutClass = showArena
     ? "atlas-layout atlas-layout--play"
     : showDistrictStack
       ? "atlas-layout atlas-layout--duo"
       : "atlas-layout atlas-layout--single";
-  const focusModeActive = isRunning && focusPrefs.enabled;
+  const focusModeActive = showArena && isRunning && focusPrefs.enabled;
   const cipherSignedShift = cipherDirection === "forward" ? cipherShift : -cipherShift;
   const gravityFlip = mode === "gravity" && Math.floor(stats.elapsedSec / 6) % 2 === 1;
   const pulseState =
@@ -4177,15 +4384,7 @@ export default function App() {
       </div>
 
       <header className="site-header">
-        <Link href={pathForRoute("home")} className="brand-mark">
-          <span className="brand-icon" aria-hidden="true">
-            TS
-          </span>
-          <span className="brand-copy">
-            <span className="brand-text">TypeShift</span>
-            <span className="brand-sub sr-only">arcade typing drills</span>
-          </span>
-        </Link>
+        <BrandLogo href={pathForRoute("home")} />
         <nav className="site-nav" aria-label="Main sections">
           {ROUTE_GROUPS.map((group) => (
             <div key={group.label} className="site-nav-group">
@@ -4217,26 +4416,28 @@ export default function App() {
       </header>
 
       <main className={atlasLayoutClass} id="main-content">
+        {appRoute === "play" && !showArena && (
+          <section className="games-library" aria-labelledby="games-title">
+            <div className="games-library-head">
+              <h1 id="games-title">Games</h1>
+              <p>Choose a mode. Each game opens in its own focused play space.</p>
+            </div>
+            <div className="games-grid">
+              {playModeCards.map((entry) => (
+                <Link key={entry.id} href={pathForMode(entry.id)} className={`game-library-card game-library-card--${entry.id}`}>
+                  <span className="game-card-glyph" aria-hidden="true">{MODE_GLYPHS[entry.id]}</span>
+                  <span className="game-card-copy">
+                    <strong>{entry.label}</strong>
+                    <span>{entry.flavor}</span>
+                  </span>
+                  <span className="game-card-arrow" aria-hidden="true">→</span>
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
         {showDistrictStack && (
           <aside className="district-stack">
-            {appRoute === "play" &&
-              (Object.keys(MODE_META) as Mode[]).map((item) => (
-                <button
-                  key={item}
-                  className={`district-card ${item === mode ? "active" : ""}`}
-                  onClick={() => {
-                    setMode(item);
-                    setModePreview(item);
-                  }}
-                  onMouseEnter={() => setModePreview(item)}
-                  onFocus={() => setModePreview(item)}
-                  aria-pressed={item === mode}
-                  aria-current={item === mode ? "page" : undefined}
-                >
-                  <strong>{MODE_META[item].label}</strong>
-                  <span>{MODE_META[item].flavor}</span>
-                </button>
-              ))}
             {appRoute === "settings" && (
               <p className="dictionary-note">
                 Settings hub: tune run setup, accessibility, sound, and focus HUD from this page.
@@ -4552,6 +4753,13 @@ export default function App() {
             tabIndex={-1}
             aria-label="Typing arena"
           >
+          <div className="game-runtime-bar">
+            <Link href="/games" className="game-back-link" aria-label="Back to Games">← <span>Games</span></Link>
+            <strong>{MODE_META[mode].label}</strong>
+            <span className="adaptive-music-readout" aria-label={`Adaptive music ${adaptiveMusicRef.current.bpm} beats per minute`}>
+              <i aria-hidden="true" /> Adaptive music · {adaptiveMusicRef.current.bpm} BPM
+            </span>
+          </div>
           <div className="arena-glow" />
           <div className="arena-headline">
             <div>
@@ -4696,26 +4904,11 @@ export default function App() {
             <div className="meteor-shell" aria-label="Meteor lane">
               <div className="meteor-skyfield" aria-hidden="true" />
               <div
-                className="ship-cockpit"
+                className="ship-cockpit elephant-cockpit"
                 aria-hidden="true"
                 style={{ transform: `translateX(-50%) rotate(${shipAimDeg}deg)` }}
               >
-                <div className="ship-shadow" />
-                <div className="ship-fin left" />
-                <div className="ship-fin right" />
-                <div className="ship-wing left" />
-                <div className="ship-tail left" />
-                <div className="ship-core">
-                  <div className="ship-shell" />
-                  <div className="ship-canopy" />
-                  <div className="ship-cannon" />
-                  <div className="ship-nose" />
-                </div>
-                <div className="ship-tail right" />
-                <div className="ship-wing right" />
-                <div className="ship-engine center" />
-                <div className="ship-engine left" />
-                <div className="ship-engine right" />
+                <img src="/logo.png" alt="" width={94} height={94} />
               </div>
               {lockedMeteorWord && (
                 <div
@@ -4796,7 +4989,7 @@ export default function App() {
                   </div>
                 );
               })}
-              <div className="meteor-floor">ground line</div>
+              <div className="meteor-floor">savanna line</div>
             </div>
           )}
 
@@ -4807,8 +5000,8 @@ export default function App() {
                   ? `Current input: ${typedPreview}`
                   : "Type anywhere to start. Space submits the word."}
               </p>
-              <button className="launch-btn" onClick={startSession}>
-                Start run
+              <button className="launch-btn" onClick={toggleSession}>
+                {isRunning ? "Stop" : "Start"}
               </button>
               <button className="ghost-btn" onClick={() => resetSession(false)} aria-keyshortcuts="Escape">
                 Reset
@@ -4827,8 +5020,8 @@ export default function App() {
                 <span>Typed</span>
                 <strong>{meteorSelection.typed || "..."}</strong>
               </div>
-              <button className="launch-btn" onClick={startSession}>
-                Start run
+              <button className="launch-btn" onClick={toggleSession}>
+                {isRunning ? "Stop" : "Start"}
               </button>
               <button className="ghost-btn" onClick={() => resetSession(false)} aria-keyshortcuts="Escape">
                 Reset
@@ -4944,7 +5137,7 @@ export default function App() {
           </section>
         )}
 
-        <aside className={`intel-stack ${showArena ? "" : "intel-stack-wide"}`}>
+        {appRoute !== "play" && <aside className={`intel-stack ${showArena ? "" : "intel-stack-wide"}`}>
           <section className="route-intro">
             <div className="route-intro-head">
               <div>
@@ -4970,17 +5163,17 @@ export default function App() {
                     lab, profile, and settings keep their own pages.
                   </p>
                   <div className="hero-pill-row">
-                    <span className="hero-pill">{Object.keys(MODE_META).length} modes</span>
+                    <span className="hero-pill">{GAME_MODES.length} modes</span>
                     <span className="hero-pill">{dictionaryPack.toUpperCase()} active pack</span>
                     <span className="hero-pill">{(bestByMode[mode] ?? 0).toFixed(1)} best WPM</span>
                     <span className="hero-pill">{dailyChallenge ? dailyChallenge.date : "Daily ready"}</span>
                   </div>
                   <div className="hero-actions">
                     <button className="launch-btn" onClick={() => navigateToRoute("play")}>
-                      Open play
+                      Open games
                     </button>
                     <button className="ghost-btn" onClick={() => navigateToRoute("play")}>
-                      Browse play modes
+                      Browse games
                     </button>
                     <button className="ghost-btn" onClick={() => navigateToRoute("boards")}>
                       Open boards
@@ -5023,7 +5216,7 @@ export default function App() {
                 </button>
               </article>
               <article className="path-card">
-                <h3>Play Deck</h3>
+                <h3>Game library</h3>
                 <p>Compare creative modes, read the rundown, and launch from one control page.</p>
                 <button
                   className="ghost-btn"
@@ -5097,67 +5290,68 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "play" && !isRunning && (
-            <section className="leaderboard-block">
-              <h3>Mode Deck</h3>
-              <div className="play-mode-grid">
-                {playModeCards.map((entry) => (
-                  <article
-                    key={`mode-catalog-${entry.id}`}
-                    className={`mode-card ${mode === entry.id ? "active" : ""}`}
-                    onMouseEnter={() => setModePreview(entry.id)}
-                    onFocus={() => setModePreview(entry.id)}
-                  >
-                    <div className="mode-card-head">
-                      <h4>{entry.label}</h4>
-                      <span>{entry.best} best</span>
-                    </div>
-                    <p>{entry.flavor}</p>
-                    <div className="custom-actions">
-                      <button
-                        className={`ghost-btn ${mode === entry.id ? "is-selected" : ""}`}
-                        onClick={() => {
-                          setMode(entry.id);
-                          setModePreview(entry.id);
-                        }}
-                      >
-                        {mode === entry.id ? "Selected" : "Choose"}
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {appRoute === "play" && !isRunning && (
-            <section className="mode-preview-card">
-              <p className="home-eyebrow">Selected mode</p>
-              <div className="mode-preview-head">
-                <div>
-                  <h3>{MODE_META[previewMode].label}</h3>
-                  <p>{MODE_META[previewMode].flavor}</p>
-                </div>
-                <button className="launch-btn" onClick={startSession}>
-                  Start {MODE_META[previewMode].label}
-                </button>
-              </div>
-              <p className="mode-preview-copy">{MODE_DETAILS[previewMode]}</p>
-              <div className="mode-preview-meta">
-                <span>{MODE_META[previewMode].timed ? `${durationSec}s run` : "Open length"}</span>
-                <span>{dictionaryPack.toUpperCase()} pack</span>
-                <span>{(bestByMode[previewMode] ?? 0).toFixed(1)} best WPM</span>
-              </div>
-              {dailyChallenge && (
-                <p className="dim">
-                  Daily challenge: {MODE_META[dailyChallenge.mode].label} · {dailyChallenge.durationSec}s ·{" "}
-                  {dailyChallenge.dictionaryPack}
-                </p>
-              )}
-            </section>
-          )}
 
           {appRoute === "profile" && (
+            <section className="leaderboard-block profile-tabs-panel">
+              <div className="profile-tab-row">
+                <Link
+                  href={pathForProfileSubroute("overview")}
+                  className={`profile-tab-link ${profileSubroute === "overview" ? "active" : ""}`}
+                >
+                  Overview
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("account")}
+                  className={`profile-tab-link ${profileSubroute === "account" ? "active" : ""}`}
+                >
+                  Account
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("social")}
+                  className={`profile-tab-link ${profileSubroute === "social" ? "active" : ""}`}
+                >
+                  Social
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("sharing")}
+                  className={`profile-tab-link ${profileSubroute === "sharing" ? "active" : ""}`}
+                >
+                  Sharing
+                </Link>
+              </div>
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "overview" && (
+            <section className="leaderboard-block profile-overview-grid">
+              <article className="profile-overview-card">
+                <div className="profile-illustration profile-illustration--shield" aria-hidden="true" />
+                <h3>Account</h3>
+                <p>Sign in, change your password, manage active sessions, export your data, or remove the account.</p>
+                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("account"))}>
+                  Open account
+                </button>
+              </article>
+              <article className="profile-overview-card">
+                <div className="profile-illustration profile-illustration--signal" aria-hidden="true" />
+                <h3>Social</h3>
+                <p>Manage friends, cloud sync, ranked queue, and active duel status from one place.</p>
+                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("social"))}>
+                  Open social
+                </button>
+              </article>
+              <article className="profile-overview-card">
+                <div className="profile-illustration profile-illustration--relay" aria-hidden="true" />
+                <h3>Sharing</h3>
+                <p>Replay share links and webhook destinations live together in a separate sharing workspace.</p>
+                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("sharing"))}>
+                  Open sharing
+                </button>
+              </article>
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "overview" && (
             <section className="leaderboard-block">
               <h3>Pilot Record</h3>
               <div className="profile-stat-grid">
@@ -5195,8 +5389,8 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && (
-            <section className="leaderboard-block">
+          {appRoute === "profile" && profileSubroute === "account" && (
+            <section className="leaderboard-block profile-section">
               <h3>Account</h3>
               <label>
                 Handle
@@ -5215,7 +5409,12 @@ export default function App() {
                 Locale
                 <input value={authLocale} onChange={(event) => setAuthLocale(event.target.value)} maxLength={12} />
               </label>
-              <div className="custom-actions">
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                resetKey={authTurnstileResetKey}
+                onTokenChange={setAuthTurnstileToken}
+              />
+              <div className="custom-actions profile-actions">
                 <button className="launch-btn" onClick={() => void registerAccountFlow()}>
                   Register
                 </button>
@@ -5224,11 +5423,7 @@ export default function App() {
                 </button>
                 <button
                   className="ghost-btn"
-                  onClick={() => {
-                    setAccountToken("");
-                    setAccountProfile(null);
-                    setAuthNote("Signed out.");
-                  }}
+                  onClick={() => void logoutCurrentAccountFlow()}
                 >
                   Logout
                 </button>
@@ -5243,9 +5438,128 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && (
+          {appRoute === "profile" && profileSubroute === "account" && (
+            <section className="leaderboard-block profile-section">
+              <h3>Security + Sessions</h3>
+              <div className="profile-lifecycle-grid">
+                <article className="profile-subcard">
+                  <div className="profile-illustration profile-illustration--shield" aria-hidden="true" />
+                  <p className="home-eyebrow">Password</p>
+                  <label>
+                    Current password
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(event) => setAuthPassword(event.target.value)}
+                      maxLength={128}
+                    />
+                  </label>
+                  <label>
+                    New password
+                    <input
+                      type="password"
+                      value={authNewPassword}
+                      onChange={(event) => setAuthNewPassword(event.target.value)}
+                      maxLength={128}
+                    />
+                  </label>
+                  <div className="custom-actions profile-actions">
+                    <button className="launch-btn" disabled={!accountToken} onClick={() => void changePasswordFlow()}>
+                      Change password
+                    </button>
+                    <button className="ghost-btn" disabled={!accountToken} onClick={() => void logoutCurrentAccountFlow()}>
+                      Sign out this session
+                    </button>
+                  </div>
+                  <p className="dim profile-note">
+                    No email recovery is available in this release. Keep your password in a password manager.
+                  </p>
+                </article>
+                <article className="profile-subcard">
+                  <div className="profile-illustration profile-illustration--orbit" aria-hidden="true" />
+                  <div className="profile-subcard-head">
+                    <div>
+                      <p className="home-eyebrow">Sessions</p>
+                      <h4>Active devices</h4>
+                    </div>
+                    <div className="custom-actions profile-actions compact">
+                      <button className="ghost-btn" disabled={!accountToken} onClick={() => void refreshAccountSessions()}>
+                        Refresh
+                      </button>
+                      <button className="ghost-btn" disabled={!accountToken} onClick={() => void logoutOtherSessionsFlow()}>
+                        Sign out others
+                      </button>
+                    </div>
+                  </div>
+                  {accountSessions.length > 0 ? (
+                    <ol className="session-list">
+                      {accountSessions.map((session) => (
+                        <li key={session.id} className="session-row">
+                          <div className="session-copy">
+                            <span className="session-title">
+                              {session.label}
+                              {session.isCurrent && <i className="session-tag">Current</i>}
+                            </span>
+                            <span className="session-meta">
+                              Last seen {new Date(session.lastSeenAt).toLocaleString()}
+                            </span>
+                          </div>
+                          {!session.isCurrent && (
+                            <button className="ghost-btn" onClick={() => void revokeSessionFlow(session.id)}>
+                              Revoke
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="dim profile-note">No active sessions loaded yet.</p>
+                  )}
+                </article>
+              </div>
+              {accountLifecycleNote && <p className="dim profile-note">{accountLifecycleNote}</p>}
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "account" && (
+            <section className="leaderboard-block profile-section">
+              <h3>Data Rights</h3>
+              <div className="profile-lifecycle-grid">
+                <article className="profile-subcard">
+                  <div className="profile-illustration profile-illustration--export" aria-hidden="true" />
+                  <p className="home-eyebrow">Export</p>
+                  <h4>Download your data</h4>
+                  <p className="dim profile-note">
+                    Export account data, preferences, sessions, replay shares, webhooks, and leaderboard-related rows.
+                  </p>
+                  <div className="custom-actions profile-actions">
+                    <button className="launch-btn" disabled={!accountToken} onClick={() => void exportAccountDataFlow()}>
+                      Export account data
+                    </button>
+                  </div>
+                </article>
+                <article className="profile-subcard danger-card">
+                  <div className="profile-illustration profile-illustration--danger" aria-hidden="true" />
+                  <p className="home-eyebrow">Deletion</p>
+                  <h4>Delete account</h4>
+                  <p className="dim profile-note">
+                    This removes account sessions, preferences, replay shares, webhooks, and score rows matching your handle.
+                  </p>
+                  <div className="custom-actions profile-actions">
+                    <button className="ghost-btn danger-btn" disabled={!accountToken} onClick={openDeleteModal}>
+                      Delete account
+                    </button>
+                  </div>
+                </article>
+              </div>
+              {accountLifecycleNote && <p className="dim profile-note">{accountLifecycleNote}</p>}
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "social" && (
             <section className="leaderboard-block">
               <h3>Cloud Sync + Friends</h3>
+              {!liveSocialEnabled && <p className="dim">{socialLaunchNote}</p>}
               <div className="custom-actions">
                 <button
                   className="launch-btn"
@@ -5292,9 +5606,10 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && (
+          {appRoute === "profile" && profileSubroute === "social" && (
             <section className="leaderboard-block">
               <h3>Ranked + Duel</h3>
+              {!liveSocialEnabled && <p className="dim">{socialLaunchNote}</p>}
               <div className="custom-actions">
                 <button className="launch-btn" disabled={!accountToken} onClick={() => void enqueueRankedFlow()}>
                   Ranked queue
@@ -5328,9 +5643,12 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && (
+          {appRoute === "profile" && profileSubroute === "sharing" && (
             <section className="leaderboard-block">
               <h3>Replay Share + Webhooks</h3>
+              <p className="dim">
+                Replay sharing and webhook endpoint management are account-only so every shared artifact has an owner.
+              </p>
               <label>
                 Share title
                 <input
@@ -5340,7 +5658,7 @@ export default function App() {
                 />
               </label>
               <div className="custom-actions">
-                <button className="launch-btn" onClick={() => void shareSelectedReplay()}>
+                <button className="launch-btn" disabled={!accountToken} onClick={() => void shareSelectedReplay()}>
                   Share selected replay
                 </button>
                 <button className="ghost-btn" onClick={() => void refreshReplayShares()}>
@@ -5390,10 +5708,18 @@ export default function App() {
                 />
               </label>
               <div className="custom-actions">
-                <button className="launch-btn" disabled={!accountToken} onClick={() => void createWebhookFlow()}>
+                <button
+                  className="launch-btn"
+                  disabled={!accountToken || !liveSocialEnabled}
+                  onClick={() => void createWebhookFlow()}
+                >
                   Add webhook
                 </button>
-                <button className="ghost-btn" disabled={!accountToken} onClick={() => void refreshWebhooks()}>
+                <button
+                  className="ghost-btn"
+                  disabled={!accountToken || !liveSocialEnabled}
+                  onClick={() => void refreshWebhooks()}
+                >
                   Refresh hooks
                 </button>
               </div>
@@ -5426,7 +5752,7 @@ export default function App() {
             </section>
           )}
 
-          {(appRoute === "play" || appRoute === "settings" || appRoute === "home") && (
+          {(appRoute === "settings" || appRoute === "home") && (
             <section className="stats-block">
               <h3>Stats</h3>
               <div className="stat-grid">
@@ -6038,27 +6364,7 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "play" && report && (
-            <section className="report-block">
-              <h3>Run recap</h3>
-              <p>Result: {report.reason}</p>
-              <p>
-                WPM {report.wpm.toFixed(1)} | RAW {report.raw.toFixed(1)}
-              </p>
-              <p>
-                CPM {report.cpm.toFixed(0)} | KPS {report.kps.toFixed(2)} | Time {formatSeconds(report.elapsedSec)}
-              </p>
-              <p>
-                Accuracy {report.accuracy.toFixed(1)}% | Efficiency {report.efficiency.toFixed(1)}%
-              </p>
-              <p>
-                Words {report.completedWords} | Correct {report.correctChars} | Wrong {report.wrongChars}
-              </p>
-              <p>Best streak {report.maxStreak}</p>
-              <p>Best ({mode}) {report.best.toFixed(1)} WPM</p>
-            </section>
-          )}
-        </aside>
+        </aside>}
       </main>
 
       {!privacyConsent && (
@@ -6095,18 +6401,41 @@ export default function App() {
         </section>
       )}
 
-      <footer className="site-footer">
-        <p>
-          <strong>TypeShift Station</strong> · Speed drills, strange modes, boards, and run history in one place.
-        </p>
-        <div className="footer-links">
-          <Link href={pathForRoute("home")}>Home</Link>
-          <Link href={pathForRoute("play")}>Play</Link>
-          <Link href={pathForRoute("boards")}>Boards</Link>
-          <Link href={pathForRoute("settings")}>Settings</Link>
-          <Link href={pathForRoute("privacy")}>Privacy</Link>
+      {deleteModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
+          <section className="modal-card danger-card">
+            <p className="home-eyebrow">Permanent action</p>
+            <h3 id="delete-account-title">Delete account</h3>
+            <p className="dim profile-note">
+              This removes your profile, sessions, replay shares, webhooks, synced preferences, and score rows linked
+              to your handle. This cannot be undone.
+            </p>
+            <ul className="legal-list profile-note">
+              <li>You will be signed out on this device.</li>
+              <li>Other active sessions will stop working.</li>
+              <li>Replay share links owned by this account will be removed.</li>
+            </ul>
+            <label>
+              Type your handle to confirm deletion
+              <input
+                value={deleteHandleConfirm}
+                onChange={(event) => setDeleteHandleConfirm(event.target.value)}
+                maxLength={24}
+              />
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={closeDeleteModal}>
+                Cancel
+              </button>
+              <button className="ghost-btn danger-btn" onClick={() => void deleteAccountFlow()}>
+                Delete account
+              </button>
+            </div>
+          </section>
         </div>
-      </footer>
+      )}
+
+      <SiteFooter />
     </div>
   );
 }
