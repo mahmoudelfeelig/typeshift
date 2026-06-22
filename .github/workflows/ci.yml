@@ -10,7 +10,23 @@ on:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      NEXTJS_ENV: test
+      JWT_SESSION_SECRET: ci-secret-change-me-before-production-123456789
+      NEXT_PUBLIC_SITE_NAME: TypeShift Station
+      NEXT_PUBLIC_SITE_URL: https://ci.typeshift.example
+      NEXT_PUBLIC_CONTROLLER_NAME: TypeShift CI Entity
+      NEXT_PUBLIC_CONTACT_EMAIL: privacy-ci@typeshift.example
+      NEXT_PUBLIC_CONTACT_ADDRESS: CI Address Placeholder
+      NEXT_PUBLIC_SUPPORT_EMAIL: support-ci@typeshift.example
+      NEXT_PUBLIC_DPO_EMAIL: dpo-ci@typeshift.example
+      NEXT_PUBLIC_LEGAL_LAST_UPDATED: March 8, 2026
+      NEXT_PUBLIC_SCORE_RETENTION_DAYS: "365"
+      NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS: "30"
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
+      NEXT_PUBLIC_SOCIAL_LIVE_ENABLED: "true"
+      NEXT_PUBLIC_CLOUDFLARE_ONLY: "true"
 
     steps:
       - name: Checkout
@@ -28,5 +44,5 @@ jobs:
       - name: Run tests
         run: npm run test
 
-      - name: Build
+      - name: Build worker bundle
         run: npm run build

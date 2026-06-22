@@ -1,0 +1,169 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  deploy-cloudflare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CF_D1_DATABASE_ID: ${{ vars.CF_D1_DATABASE_ID }}
+      CF_CACHE_KV_ID: ${{ vars.CF_CACHE_KV_ID }}
+      CF_RATE_LIMIT_KV_ID: ${{ vars.CF_RATE_LIMIT_KV_ID }}
+      NEXTJS_ENV: production
+      JWT_SESSION_SECRET: build-time-placeholder-change-me
+      NEXT_PUBLIC_SITE_NAME: ${{ vars.NEXT_PUBLIC_SITE_NAME }}
+      NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+      NEXT_PUBLIC_CONTROLLER_NAME: ${{ vars.NEXT_PUBLIC_CONTROLLER_NAME }}
+      NEXT_PUBLIC_CONTACT_EMAIL: ${{ vars.NEXT_PUBLIC_CONTACT_EMAIL }}
+      NEXT_PUBLIC_CONTACT_ADDRESS: ${{ vars.NEXT_PUBLIC_CONTACT_ADDRESS }}
+      NEXT_PUBLIC_SUPPORT_EMAIL: ${{ vars.NEXT_PUBLIC_SUPPORT_EMAIL }}
+      NEXT_PUBLIC_DPO_EMAIL: ${{ vars.NEXT_PUBLIC_DPO_EMAIL }}
+      NEXT_PUBLIC_LEGAL_LAST_UPDATED: ${{ vars.NEXT_PUBLIC_LEGAL_LAST_UPDATED }}
+      NEXT_PUBLIC_SCORE_RETENTION_DAYS: ${{ vars.NEXT_PUBLIC_SCORE_RETENTION_DAYS }}
+      NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS: ${{ vars.NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS }}
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${{ vars.NEXT_PUBLIC_TURNSTILE_SITE_KEY }}
+      NEXT_PUBLIC_SOCIAL_LIVE_ENABLED: "true"
+      NEXT_PUBLIC_CLOUDFLARE_ONLY: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate production Wrangler config
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          function required(name) {
+            const value = process.env[name];
+            if (!value) {
+              throw new Error(`Missing required GitHub Actions variable or secret: ${name}`);
+            }
+            return value;
+          }
+
+          const siteUrl = required("NEXT_PUBLIC_SITE_URL");
+          const hostname = new URL(siteUrl).hostname;
+          const config = {
+            "$schema": "../node_modules/wrangler/config-schema.json",
+            name: "typeshift",
+            main: ".open-next/worker.js",
+            compatibility_date: "2026-03-08",
+            compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],
+            assets: {
+              directory: ".open-next/assets",
+              binding: "ASSETS",
+            },
+            services: [
+              {
+                binding: "WORKER_SELF_REFERENCE",
+                service: "typeshift",
+              },
+            ],
+            vars: {
+              NEXTJS_ENV: "production",
+              NEXT_PUBLIC_SITE_NAME: process.env.NEXT_PUBLIC_SITE_NAME || "TypeShift",
+              NEXT_PUBLIC_SITE_URL: siteUrl,
+              NEXT_PUBLIC_CONTROLLER_NAME: process.env.NEXT_PUBLIC_CONTROLLER_NAME || "TypeShift",
+              NEXT_PUBLIC_CONTACT_EMAIL: process.env.NEXT_PUBLIC_CONTACT_EMAIL || "",
+              NEXT_PUBLIC_CONTACT_ADDRESS: process.env.NEXT_PUBLIC_CONTACT_ADDRESS || "",
+              NEXT_PUBLIC_SUPPORT_EMAIL: process.env.NEXT_PUBLIC_SUPPORT_EMAIL || "",
+              NEXT_PUBLIC_DPO_EMAIL: process.env.NEXT_PUBLIC_DPO_EMAIL || "",
+              NEXT_PUBLIC_LEGAL_LAST_UPDATED:
+                process.env.NEXT_PUBLIC_LEGAL_LAST_UPDATED || "March 8, 2026",
+              NEXT_PUBLIC_SCORE_RETENTION_DAYS:
+                process.env.NEXT_PUBLIC_SCORE_RETENTION_DAYS || "365",
+              NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS:
+                process.env.NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS || "30",
+              NEXT_PUBLIC_TURNSTILE_SITE_KEY: required("NEXT_PUBLIC_TURNSTILE_SITE_KEY"),
+              NEXT_PUBLIC_SOCIAL_LIVE_ENABLED:
+                process.env.NEXT_PUBLIC_SOCIAL_LIVE_ENABLED || "true",
+              NEXT_PUBLIC_CLOUDFLARE_ONLY: "true",
+            },
+            routes: [
+              {
+                pattern: hostname,
+                custom_domain: true,
+              },
+            ],
+            d1_databases: [
+              {
+                binding: "DB",
+                database_name: "typeshift-prod",
+                database_id: required("CF_D1_DATABASE_ID"),
+                remote: true,
+              },
+            ],
+            kv_namespaces: [
+              {
+                binding: "CACHE_KV",
+                id: required("CF_CACHE_KV_ID"),
+              },
+              {
+                binding: "RATE_LIMIT_KV",
+                id: required("CF_RATE_LIMIT_KV_ID"),
+                remote: true,
+              },
+            ],
+            analytics_engine_datasets: [
+              {
+                binding: "USAGE_ANALYTICS",
+                dataset: "typeshift_usage",
+              },
+            ],
+            observability: {
+              enabled: true,
+              head_sampling_rate: 1,
+              logs: {
+                invocation_logs: true,
+                head_sampling_rate: 1,
+              },
+            },
+            r2_buckets: [
+              {
+                bucket_name: "typeshift-next-cache",
+                binding: "NEXT_INC_CACHE_R2_BUCKET",
+                remote: true,
+              },
+              {
+                bucket_name: "typeshift-replays",
+                binding: "REPLAY_BUCKET",
+                remote: true,
+              },
+              {
+                bucket_name: "typeshift-backups",
+                binding: "BACKUP_BUCKET",
+                remote: true,
+              },
+            ],
+          };
+
+          fs.writeFileSync("client/wrangler.jsonc", `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Apply production D1 schema
+        run: npx wrangler d1 execute typeshift-prod --config client/wrangler.jsonc --remote --file client/cloudflare/d1/migrations/0001_initial.sql --yes
+
+      - name: Deploy to Cloudflare Workers
+        run: npm run deploy:worker
