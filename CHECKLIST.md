@@ -1,5 +1,10 @@
 # Wanted Features Checklist
 
+Status key:
+- `[x]` implemented in the production Next/Cloudflare Worker path.
+- `[~]` implemented with a scoped launch limitation called out in the item.
+- `[ ]` not implemented.
+
 ## Core Features
 - [x] Ghost pace racing per mode
 - [x] Replay capture + timeline viewer
@@ -15,7 +20,7 @@
 - [x] Accessibility presets + selectable sound packs
 - [x] Account auth + cloud preferences sync
 - [x] Ranked matchmaking + duel queue
-- [x] Replay hub sharing + outbound webhooks
+- [x] Replay hub sharing + webhook endpoint management
 - [x] Pulse rhythm lane
 - [x] Cipher global shift mode
 - [x] Meteor spaceship lane
@@ -75,7 +80,7 @@
 - [x] Controlled fallback policy (prod can fail fast if DB unavailable)
 - [x] Real-time multiplayer race APIs
 - [x] Tournament + spectator APIs
-- [x] Race/tournament PostgreSQL persistence
+- [x] Race/tournament D1 persistence for the Cloudflare Worker launch
 - [x] Daily challenge submit + leaderboard APIs
 - [x] Seasonal leaderboard API
 - [x] Offline score queue + sync
@@ -91,5 +96,12 @@
 
 ## CI / Tests
 - [x] Automated server tests
+- [x] Worker API integration tests for account, leaderboard, privacy, friend, race, tournament, duel, and webhook flows
 - [x] Client strict typecheck gate
 - [x] CI workflow running tests + build
+
+## Resume / CV Focus
+- [x] Cloudflare-first full-stack architecture: Next.js 15, React 19, OpenNext Workers, D1, R2, Turnstile, CI/CD, backup workflow
+- [x] Real-time typing product surface: 21 game modes, deep-linked mode routes, custom dictionaries, replays, heatmaps, accessibility presets
+- [x] Security/privacy work: token-bound score submission, Turnstile auth, data export/deletion, privacy consent, aggregate analytics controls
+- [~] Browser e2e suite: planned as a dedicated Playwright pass once the local Node/WSL environment can run browser tooling
