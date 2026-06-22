@@ -39,6 +39,9 @@ self.addEventListener("fetch", (event) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return;
   }
+  if (url.origin !== self.location.origin) {
+    return;
+  }
 
   if (request.url.includes("/api/")) {
     event.respondWith(

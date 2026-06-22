@@ -5,9 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
+    "clean:next": "node scripts/clean-next.mjs",
+    "clean:worker": "node scripts/clean-worker.mjs",
+    "prebuild": "npm run clean:next",
     "build": "next build",
+    "prebuild:worker": "npm run clean:worker",
+    "build:worker": "opennextjs-cloudflare build",
+    "predeploy:worker": "npm run clean:worker",
+    "deploy:worker": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "prepreview:worker": "npm run clean:worker",
+    "preview:worker": "opennextjs-cloudflare build && wrangler dev",
     "start": "next start",
-    "test": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts && tsc -p tsconfig.json --noEmit",
     "preview": "next start"
   },
   "dependencies": {

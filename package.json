@@ -8,10 +8,22 @@
   ],
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "npm run build -w server && npm run build -w client",
-    "test": "npm run test -w server && npm run test -w client",
+    "build": "npm run build:worker -w client",
+    "build:client": "npm run build:worker -w client",
+    "test": "npm run test -w client",
+    "test:e2e": "npx playwright test",
+    "preview:worker": "npm run preview:worker -w client",
+    "deploy:worker": "npm run deploy:worker -w client",
     "backup:db": "bash ./scripts/backup-db.sh",
     "restore:db": "bash ./scripts/restore-db.sh",
+    "restore:drill": "bash ./scripts/restore-drill.sh",
+    "smoke:check": "bash ./scripts/smoke-check.sh",
     "start": "node scripts/start.mjs"
+  },
+  "dependencies": {
+    "@opennextjs/cloudflare": "^1.17.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.103.0"
   }
 }

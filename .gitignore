@@ -4,9 +4,18 @@ coverage
 .env
 .env.*
 !.env.example
+.dev.vars
 client/dist
 server/dist
 *.log
 
 client/.next
+client/.open-next
+client/.wrangler
+client/wrangler.jsonc
+!client/wrangler.example.jsonc
+*.tsbuildinfo
+playwright-report
+test-results
+NUL
 build-output.txt
