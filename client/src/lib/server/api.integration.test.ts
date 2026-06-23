@@ -265,6 +265,42 @@ test("privacy analytics aggregates and summarizes events", async () => {
   assert.ok(summary.body.rows.some((row) => row.eventName === "page_view"));
 });
 
+test("bot seed route creates a capped realistic leaderboard dataset", async () => {
+  const seed = await requestJson<{
+    ok: true;
+    bots: number;
+    rows: number;
+    handles: string[];
+  }>("admin/seed-bots", {
+    method: "POST",
+    body: JSON.stringify({ botCount: 14, modes: ["time", "code"] }),
+  });
+  assert.equal(seed.status, 200);
+  assert.equal(seed.body.bots, 14);
+  assert.equal(seed.body.rows, 28);
+  assert.equal(seed.body.handles.length, 14);
+
+  const board = await requestJson<{ entries: Array<{ username: string; certified: boolean }> }>(
+    "leaderboard?mode=time&limit=20&certifiedOnly=false",
+  );
+  assert.equal(board.status, 200);
+  assert.ok(board.body.entries.length >= 10);
+  assert.ok(board.body.entries.some((entry) => entry.username === "NovaKeys"));
+  assert.ok(board.body.entries.every((entry) => entry.certified === false));
+
+  const reseed = await requestJson<{ rows: number }>("admin/seed-bots", {
+    method: "POST",
+    body: JSON.stringify({ botCount: 14, modes: ["time", "code"] }),
+  });
+  assert.equal(reseed.status, 200);
+
+  const after = await requestJson<{ entries: Array<{ username: string }> }>(
+    "leaderboard?mode=time&limit=100&certifiedOnly=false",
+  );
+  const uniqueHandles = new Set(after.body.entries.map((entry) => entry.username));
+  assert.equal(uniqueHandles.size, 14);
+});
+
 test("social routes support friends, duel queues, races, tournaments, and webhooks", async () => {
   const alphaHandle = `alpha${Date.now().toString().slice(-6)}`;
   const betaHandle = `beta${Date.now().toString().slice(-6)}`;

@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import BrandLogo from "./components/BrandLogo";
 import SiteFooter from "./components/SiteFooter";
 import TurnstileWidget from "./components/TurnstileWidget";
@@ -49,6 +49,7 @@ import {
   reportTournamentMatch,
   requestFriend,
   respondFriend,
+  seedBotLeaderboard,
   shareReplay,
   startRaceRoom,
   submitScore,
@@ -80,10 +81,12 @@ import {
 import {
   buildDictionaryPool,
   generateWords,
+  loadFrequencyDictionary,
   loadLargeDictionary,
   splitCustomWords,
   type DictionaryPack,
 } from "./lib/dictionary";
+import { generateCodePrompt, type CodeIndentMode, type CodeLanguage } from "./lib/code-prompts";
 import { chooseMeteorTarget } from "./lib/meteor-targeting";
 import { GAME_MODES, MODE_DETAILS, MODE_META, modeFromSlug, pathForMode } from "./lib/game-modes";
 
@@ -115,14 +118,84 @@ const QUOTES = [
   "Mistakes cost less when you catch them early.",
 ];
 
-const CODE_SNIPPETS = [
-  "const score = typed.correct / Math.max(1, typed.total);",
-  "if (mode === \"chart\") return commitOnBeat(word, timing);",
-  "export async function loadReplay(id: string): Promise<void> {",
-  "for (const key of keyboardRows) heatmap[key] = stats[key] ?? 0;",
-  "router.post(\"/duel/update\", validateAuth, submitDuelProgress);",
-  "type LeaderboardRow = { handle: string; wpm: number; acc: number };",
+const QUOTE_OPENERS = [
+  "A steady rhythm",
+  "Careful practice",
+  "The quiet run",
+  "Fast progress",
+  "Good focus",
+  "A clean mistake",
+  "The next word",
+  "Sharp accuracy",
+  "Patient speed",
+  "Small corrections",
+  "Daily training",
+  "A relaxed hand",
+  "The best sprint",
+  "Clear attention",
+  "Better typing",
+  "A calm reset",
+  "The strongest pace",
+  "Every clean line",
+  "A focused session",
+  "The final word",
 ];
+
+const QUOTE_MIDDLES = [
+  "starts before the first key",
+  "comes from reading ahead",
+  "turns hesitation into control",
+  "keeps pressure from becoming noise",
+  "makes speed easier to trust",
+  "builds from one honest correction",
+  "stays smooth when the timer gets loud",
+  "rewards the hands that do less",
+  "keeps the eyes moving forward",
+  "removes panic from the run",
+  "finds space between two thoughts",
+  "makes every miss easier to study",
+  "keeps the line light and readable",
+  "comes from listening to the pattern",
+  "lets the next word arrive early",
+  "turns repetition into confidence",
+  "keeps the keyboard feeling simple",
+  "makes hard words feel smaller",
+  "moves faster when it stops rushing",
+  "keeps the whole run honest",
+];
+
+const QUOTE_ENDINGS = [
+  "when accuracy stays first.",
+  "while the cursor keeps moving.",
+  "if the next word is already visible.",
+  "because smooth hands waste less time.",
+  "when every correction teaches something.",
+  "without turning the run into a fight.",
+  "as soon as the eyes stop chasing.",
+  "when the rhythm survives one mistake.",
+  "because clean lines carry speed.",
+  "while attention stays on the lane.",
+  "if pressure never owns the keyboard.",
+  "when the hands stay loose.",
+  "because a reset is not a failure.",
+  "while the timer becomes background noise.",
+  "if the word shape is clear.",
+  "when practice has a specific target.",
+  "because the best run is readable.",
+  "while small wins keep stacking.",
+  "when the sentence has room to breathe.",
+  "because consistency beats panic.",
+];
+
+function pickQuote(): string {
+  if (Math.random() < 0.12) {
+    return QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? QUOTES[0]!;
+  }
+  const opener = QUOTE_OPENERS[Math.floor(Math.random() * QUOTE_OPENERS.length)] ?? QUOTE_OPENERS[0]!;
+  const middle = QUOTE_MIDDLES[Math.floor(Math.random() * QUOTE_MIDDLES.length)] ?? QUOTE_MIDDLES[0]!;
+  const ending = QUOTE_ENDINGS[Math.floor(Math.random() * QUOTE_ENDINGS.length)] ?? QUOTE_ENDINGS[0]!;
+  return `${opener} ${middle} ${ending}`;
+}
 
 export type AppRoute = "home" | "play" | "social" | "boards" | "lab" | "profile" | "privacy" | "settings";
 type ProfileSubroute =
@@ -156,7 +229,19 @@ const ROUTE_LABELS: Record<AppRoute, string> = {
 const ROUTE_GROUPS: Array<{ label: string; routes: AppRoute[] }> = [
   { label: "Start", routes: ["home", "play"] },
   { label: "Community", routes: ["social", "boards", "lab"] },
-  { label: "Account", routes: ["profile", "privacy", "settings"] },
+  { label: "System", routes: ["settings"] },
+];
+const DICTIONARY_QA_PACKS: DictionaryPack[] = [
+  "core",
+  "tech",
+  "myth",
+  "blitz",
+  "top1k",
+  "top5k",
+  "top10k",
+  "verbs",
+  "nouns",
+  "code",
 ];
 
 const ROUTE_COPY: Record<AppRoute, { title: string; subtitle: string }> = {
@@ -307,6 +392,44 @@ type CipherDirection = "forward" | "backward";
 type PulseJudgeTone = "perfect" | "great" | "ok" | "miss";
 type SoundPack = "arcade" | "retro" | "cinematic" | "soft" | "mute";
 type AccessibilityPreset = "standard" | "reduced" | "contrast" | "colorblind" | "dyslexia";
+type WordShape = "compact" | "balanced" | "wide" | "wild";
+
+interface ModeTuning {
+  wordShape: WordShape;
+  intensity: number;
+  strictness: number;
+  density: number;
+  reveal: number;
+  intervalSec: number;
+  spread: number;
+  perkEvery: number;
+  rivalPace: number;
+  teamSize: number;
+}
+
+const DEFAULT_MODE_TUNING: Record<Mode, ModeTuning> = {
+  time: { wordShape: "balanced", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  quote: { wordShape: "wide", intensity: 2, strictness: 2, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  meteor: { wordShape: "compact", intensity: 2, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  zen: { wordShape: "balanced", intensity: 1, strictness: 1, density: 3, reveal: 1, intervalSec: 8, spread: 1, perkEvery: 25, rivalPace: 85, teamSize: 2 },
+  pulse: { wordShape: "compact", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  relay: { wordShape: "balanced", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  cipher: { wordShape: "balanced", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  drift: { wordShape: "balanced", intensity: 3, strictness: 2, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  reverse: { wordShape: "compact", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  echo: { wordShape: "balanced", intensity: 3, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  rogue: { wordShape: "balanced", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 18, rivalPace: 92, teamSize: 2 },
+  duel: { wordShape: "compact", intensity: 4, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 96, teamSize: 2 },
+  code: { wordShape: "balanced", intensity: 3, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  coach: { wordShape: "wild", intensity: 3, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  blackout: { wordShape: "balanced", intensity: 4, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  chain: { wordShape: "compact", intensity: 4, strictness: 3, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  gravity: { wordShape: "compact", intensity: 4, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  coop: { wordShape: "balanced", intensity: 2, strictness: 2, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  infection: { wordShape: "balanced", intensity: 4, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  stealth: { wordShape: "wide", intensity: 4, strictness: 4, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+  chart: { wordShape: "compact", intensity: 5, strictness: 5, density: 4, reveal: 1, intervalSec: 6, spread: 2, perkEvery: 20, rivalPace: 92, teamSize: 2 },
+};
 
 interface AccessibilityPrefs {
   announceEvents: boolean;
@@ -379,6 +502,22 @@ interface MeteorWord {
   xPercent: number;
   yPercent: number;
   speed: number;
+}
+
+interface SubmittedWordSnapshot {
+  index: number;
+  typed: string;
+  result: "good" | "bad" | undefined;
+  correctChars: number;
+  wrongChars: number;
+  rawChars: number;
+  errors: number;
+  streak: number;
+  maxStreak: number;
+  completedWords: number;
+  chainCombo: number;
+  infectedIndices: number[];
+  echoPending: string | null;
 }
 
 interface LaserFx {
@@ -512,8 +651,8 @@ function meteorDifficulty(runtime: RuntimeState) {
   return {
     elapsedSec,
     // Linear ramp: starts easy, then steadily increases difficulty over time.
-    speedScale: clamp(0.58 + elapsedSec * 0.012, 0.58, 2.3),
-    spawnIntervalSec: clamp(1.45 - elapsedSec * 0.005, 0.55, 1.45),
+    speedScale: clamp(0.48 + elapsedSec * 0.008, 0.48, 1.65),
+    spawnIntervalSec: clamp(1.9 - elapsedSec * 0.003, 0.82, 1.9),
   };
 }
 
@@ -721,6 +860,117 @@ function generateSeededWords(pool: string[], count: number, seed: number): strin
   return words;
 }
 
+function buildPromptWindow(
+  words: string[],
+  currentIndex: number,
+  mode: Mode,
+  codeLineStarts: Record<number, number>,
+): Array<{ word: string; index: number }> {
+  if (words.length === 0) {
+    return [];
+  }
+  if (mode === "code" && Object.keys(codeLineStarts).length > 0) {
+    const starts = Object.keys(codeLineStarts)
+      .map(Number)
+      .filter((index) => Number.isFinite(index))
+      .sort((a, b) => a - b);
+    let activeLine = 0;
+    for (let i = 0; i < starts.length; i += 1) {
+      const lineStart = starts[i];
+      if (lineStart != null && lineStart <= currentIndex) {
+        activeLine = i;
+      } else {
+        break;
+      }
+    }
+    const start = starts[activeLine] ?? currentIndex;
+    const end = starts[Math.min(activeLine + 4, starts.length)] ?? Math.min(words.length, start + 90);
+    return words.slice(start, end).map((word, offset) => ({ word, index: start + offset }));
+  }
+
+  const lineBudget = mode === "quote" ? 64 : 56;
+  const lines: Array<Array<{ word: string; index: number }>> = [];
+  let line: Array<{ word: string; index: number }> = [];
+  let lineLength = 0;
+  words.forEach((word, index) => {
+    const nextLength = lineLength + word.length + (line.length > 0 ? 1 : 0);
+    if (line.length > 0 && nextLength > lineBudget) {
+      lines.push(line);
+      line = [];
+      lineLength = 0;
+    }
+    line.push({ word, index });
+    lineLength += word.length + (line.length > 1 ? 1 : 0);
+  });
+  if (line.length > 0) {
+    lines.push(line);
+  }
+  const activeLineIndex = Math.max(
+    0,
+    lines.findIndex((entries) => entries.some((entry) => entry.index === currentIndex)),
+  );
+  return lines.slice(activeLineIndex, activeLineIndex + 4).flat();
+}
+
+interface ModePromptProfile {
+  minLength?: number;
+  maxLength?: number;
+  alphaOnly?: boolean;
+  noTrailingPunctuation?: boolean;
+}
+
+const MODE_PROMPT_PROFILES: Partial<Record<Mode, ModePromptProfile>> = {
+  time: { minLength: 3, maxLength: 9 },
+  pulse: { minLength: 2, maxLength: 7, noTrailingPunctuation: true },
+  duel: { minLength: 2, maxLength: 7, noTrailingPunctuation: true },
+  chart: { minLength: 2, maxLength: 6, noTrailingPunctuation: true },
+  relay: { minLength: 3, maxLength: 8 },
+  cipher: { minLength: 3, maxLength: 10, alphaOnly: true },
+  drift: { minLength: 3, maxLength: 8 },
+  reverse: { minLength: 3, maxLength: 8 },
+  gravity: { minLength: 3, maxLength: 8 },
+  echo: { minLength: 4, maxLength: 9, noTrailingPunctuation: true },
+  blackout: { minLength: 4, maxLength: 10, noTrailingPunctuation: true },
+  stealth: { minLength: 4, maxLength: 10, noTrailingPunctuation: true },
+  rogue: { minLength: 3, maxLength: 9 },
+  chain: { minLength: 3, maxLength: 8 },
+  coop: { minLength: 3, maxLength: 8 },
+  infection: { minLength: 4, maxLength: 8 },
+  coach: { minLength: 3, maxLength: 12 },
+  meteor: { minLength: 3, maxLength: 8, alphaOnly: true },
+};
+
+function baseWordLength(word: string): number {
+  return word.replace(/[.,!?;:]+$/g, "").length;
+}
+
+function applyModePromptProfile(pool: string[], mode: Mode, tuning: ModeTuning): string[] {
+  const profile = MODE_PROMPT_PROFILES[mode];
+  if (!profile || pool.length === 0) {
+    return pool;
+  }
+  const shapeBounds: Record<WordShape, { min?: number; max?: number }> = {
+    compact: { min: 2, max: 6 },
+    balanced: {},
+    wide: { min: 6, max: 12 },
+    wild: { min: 2, max: 12 },
+  };
+  const shape = shapeBounds[tuning.wordShape];
+  const minLength = shape.min ?? profile.minLength;
+  const maxLength = shape.max ?? profile.maxLength;
+  const filtered = pool.filter((word) => {
+    const clean = word.replace(/[.,!?;:]+$/g, "");
+    const length = baseWordLength(word);
+    if (profile.alphaOnly && !/^[a-z]+$/i.test(clean)) return false;
+    if (profile.noTrailingPunctuation && clean !== word) return false;
+    if (minLength != null && length < minLength) return false;
+    if (maxLength != null && length > maxLength) return false;
+    return true;
+  });
+  const minimumUsefulPool = Math.max(12, Math.min(80, Math.floor(pool.length * 0.2)));
+  return filtered.length >= minimumUsefulPool ? filtered : pool;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -742,6 +992,7 @@ export default function App() {
   const replayImportInputRef = useRef<HTMLInputElement | null>(null);
   const pendingPreviewRef = useRef("");
   const typedRef = useRef("");
+  const submittedHistoryRef = useRef<SubmittedWordSnapshot[]>([]);
   const wordQueueRef = useRef<string[]>([]);
   const promptWordsRef = useRef<string[]>([]);
   const currentIndexRef = useRef(0);
@@ -824,6 +1075,7 @@ export default function App() {
   const [customInput, setCustomInput] = useState("");
   const [customWords, setCustomWords] = useState<string[]>([]);
   const [largeWords, setLargeWords] = useState<string[]>([]);
+  const [frequencyWords, setFrequencyWords] = useState<string[]>([]);
   const [dictionaryStatus, setDictionaryStatus] = useState("Loading word list...");
   const [report, setReport] = useState<SessionReport | null>(null);
   const [stats, setStats] = useState<LiveStats>({
@@ -876,6 +1128,10 @@ export default function App() {
   });
   const [cipherShift, setCipherShift] = useState(3);
   const [cipherDirection, setCipherDirection] = useState<CipherDirection>("forward");
+  const [codeLanguage, setCodeLanguage] = useState<CodeLanguage>("typescript");
+  const [codeIndentMode, setCodeIndentMode] = useState<CodeIndentMode>("preserve");
+  const [codeLineStarts, setCodeLineStarts] = useState<Record<number, number>>({});
+  const [modeTuning, setModeTuning] = useState<Record<Mode, ModeTuning>>(DEFAULT_MODE_TUNING);
   const [pulseBpm, setPulseBpm] = useState(108);
   const [pulseJudge, setPulseJudge] = useState<{ label: string; tone: PulseJudgeTone } | null>(null);
   const [soundPack, setSoundPack] = useState<SoundPack>("arcade");
@@ -926,7 +1182,7 @@ export default function App() {
   const [liveMessage, setLiveMessage] = useState("");
   const [liveAlertMessage, setLiveAlertMessage] = useState("");
   const [chainCombo, setChainCombo] = useState(1);
-  const [coopTurn, setCoopTurn] = useState<1 | 2>(1);
+  const [coopTurn, setCoopTurn] = useState(1);
   const [infectedIndices, setInfectedIndices] = useState<number[]>([]);
   const [certifiedRun, setCertifiedRun] = useState(false);
   const [modePreview, setModePreview] = useState<Mode | null>(null);
@@ -963,6 +1219,7 @@ export default function App() {
   const [rankedStatus, setRankedStatus] = useState<string>("idle");
   const [activeDuel, setActiveDuel] = useState<DuelState | null>(null);
   const [duelNote, setDuelNote] = useState<string | null>(null);
+  const [duelQueueAction, setDuelQueueAction] = useState<"ranked" | "casual" | "status" | null>(null);
   const [replayShareTitle, setReplayShareTitle] = useState("My run");
   const [sharedReplayIdInput, setSharedReplayIdInput] = useState("");
   const [replayShares, setReplayShares] = useState<ReplayShareEntry[]>([]);
@@ -995,7 +1252,7 @@ export default function App() {
       win.globalPrivacyControl === true
     );
   }, []);
-  const analyticsEnabled = privacyConsent?.analytics === true && !doNotTrackEnabled;
+  const analyticsEnabled = privacyConsent?.analytics === true;
   const canStoreComfortPrefs = privacyConsent?.preferences === true;
   const isAnalyticsAdmin = Boolean(
     accountProfile && ADMIN_HANDLES.has(accountProfile.handle.trim().toLowerCase()),
@@ -1032,11 +1289,33 @@ export default function App() {
         customOnly: settings.customOnly,
         customWords,
         largeWords,
+        frequencyWords,
         punctuation: settings.punctuation,
         numbers: settings.numbers,
         lowercase: settings.lowercase,
       }),
-    [dictionaryPack, settings, customWords, largeWords],
+    [dictionaryPack, settings, customWords, largeWords, frequencyWords],
+  );
+  const dictionaryQaRows = useMemo(
+    () =>
+      DICTIONARY_QA_PACKS.map((pack) => {
+        const pool = buildDictionaryPool({
+          pack,
+          customOnly: false,
+          customWords: [],
+          largeWords,
+          frequencyWords,
+          punctuation: false,
+          numbers: false,
+          lowercase: true,
+        });
+        return {
+          pack,
+          count: pool.length,
+          sample: pool.slice(0, 18),
+        };
+      }),
+    [largeWords, frequencyWords],
   );
   const weakPatterns = useMemo(
     () =>
@@ -1058,22 +1337,21 @@ export default function App() {
     }
     return activePool;
   }, [activePool, adaptiveTrainer, weakPatterns]);
-  const playPool = adaptivePool;
+  const activeModeTuning = modeTuning[mode] ?? DEFAULT_MODE_TUNING[mode];
+  const playPool = useMemo(
+    () => applyModePromptProfile(adaptivePool, mode, activeModeTuning),
+    [activeModeTuning, adaptivePool, mode],
+  );
 
   const activeWords = promptWords;
 
   const visibleWords = useMemo(() => {
-    const start = Math.max(0, currentIndex - 14);
-    const end = Math.min(activeWords.length, currentIndex + 70);
-    const entries = activeWords.slice(start, end).map((word, offset) => ({
-      word,
-      index: start + offset,
-    }));
+    const entries = buildPromptWindow(activeWords, currentIndex, mode, codeLineStarts);
     if (mode === "reverse") {
       entries.reverse();
     }
     return entries;
-  }, [activeWords, currentIndex, mode]);
+  }, [activeWords, codeLineStarts, currentIndex, mode]);
 
   useEffect(() => {
     try {
@@ -1538,11 +1816,14 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    loadLargeDictionary()
-      .then((words) => {
+    Promise.all([loadLargeDictionary(), loadFrequencyDictionary()])
+      .then(([words, rankedWords]) => {
         if (cancelled) return;
         setLargeWords(words);
-        setDictionaryStatus(`Dictionary loaded: ${words.length.toLocaleString()} words`);
+        setFrequencyWords(rankedWords);
+        setDictionaryStatus(
+          `Dictionary loaded: ${rankedWords.length.toLocaleString()} ranked + ${words.length.toLocaleString()} source words`,
+        );
       })
       .catch(() => {
         if (cancelled) return;
@@ -1571,6 +1852,25 @@ export default function App() {
     return out;
   }
 
+  function setStructuredCodePrompt(count = 220): void {
+    const prompt = generateCodePrompt(codeLanguage, codeIndentMode, count);
+    promptWordsRef.current = prompt.tokens;
+    setPromptWords(prompt.tokens);
+    setCodeLineStarts(prompt.lineStarts);
+  }
+
+  function appendStructuredCodePrompt(prev: string[], count = 80): string[] {
+    const prompt = generateCodePrompt(codeLanguage, codeIndentMode, count);
+    const offset = prev.length;
+    setCodeLineStarts((current) => {
+      const shifted = Object.fromEntries(
+        Object.entries(prompt.lineStarts).map(([index, indent]) => [String(Number(index) + offset), indent]),
+      ) as Record<number, number>;
+      return { ...current, ...shifted };
+    });
+    return [...prev, ...prompt.tokens];
+  }
+
   useEffect(() => {
     wordQueueRef.current = [];
     primeWordQueue();
@@ -1581,12 +1881,19 @@ export default function App() {
       window.clearTimeout(warmTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePool, adaptiveTrainer]);
+  }, [playPool, adaptiveTrainer]);
+
+  useEffect(() => {
+    if (mode === "code") {
+      resetSession(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codeLanguage, codeIndentMode]);
 
   useEffect(() => {
     resetSession(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, durationSec, activePool, adaptiveTrainer]);
+  }, [mode, durationSec, playPool, adaptiveTrainer]);
 
   useEffect(
     () => () => {
@@ -1659,7 +1966,7 @@ export default function App() {
   function applyPrivacyConsent(next: { analytics: boolean; preferences: boolean }): void {
     const resolved: PrivacyConsent = {
       version: PRIVACY_CONSENT_VERSION,
-      analytics: next.analytics && !doNotTrackEnabled,
+      analytics: next.analytics,
       preferences: next.preferences,
       decidedAt: new Date().toISOString(),
     };
@@ -1699,6 +2006,31 @@ export default function App() {
       return;
     }
     navigateToRoute(fallback);
+  }
+
+  function applyRecommendedModeSetup(modeId: Mode = mode): void {
+    const recommended = MODE_META[modeId].recommended;
+    setDurationSec(recommended.durationSec);
+    setDictionaryPack(recommended.pack as DictionaryPack);
+    setModeTuning((prev) => ({ ...prev, [modeId]: DEFAULT_MODE_TUNING[modeId] }));
+    if (modeId === "pulse") {
+      setPulseBpm(104);
+    } else if (modeId === "duel") {
+      setPulseBpm(112);
+    } else if (modeId === "chart") {
+      setPulseBpm(124);
+    }
+    resetSession(true);
+  }
+
+  function updateActiveModeTuning(patch: Partial<ModeTuning>): void {
+    setModeTuning((prev) => ({
+      ...prev,
+      [mode]: {
+        ...(prev[mode] ?? DEFAULT_MODE_TUNING[mode]),
+        ...patch,
+      },
+    }));
   }
 
   async function refreshLeaderboard(silent = false) {
@@ -1874,6 +2206,22 @@ export default function App() {
     }
   }
 
+  async function seedAdminBotRows(): Promise<void> {
+    if (!isAnalyticsAdmin) return;
+    const token = analyticsAdminToken.trim();
+    if (!token && !isDevEnvironment) {
+      setAdminNote("Enter the metrics token before seeding bot rows.");
+      return;
+    }
+    try {
+      const result = await seedBotLeaderboard(token, 12);
+      setAdminNote(`Seeded ${result.rows} rows for ${result.bots} bots.`);
+      await Promise.all([refreshAdminLeaderboardRows(), refreshLeaderboard(true), refreshChallengeAndSeason(true)]);
+    } catch (error) {
+      setAdminNote((error as Error).message);
+    }
+  }
+
   useEffect(() => {
     if (!accountToken) {
       setAccountProfile(null);
@@ -1953,6 +2301,7 @@ export default function App() {
       setRaceState(result.room);
       setMode(result.room.mode);
       setRaceError(null);
+      router.push(pathForMode(result.room.mode));
     } catch (error) {
       setRaceError((error as Error).message);
     }
@@ -1971,6 +2320,7 @@ export default function App() {
       setRaceState(result.room);
       setMode(result.room.mode);
       setRaceError(null);
+      router.push(pathForMode(result.room.mode));
     } catch (error) {
       setRaceError((error as Error).message);
     }
@@ -1987,7 +2337,9 @@ export default function App() {
     try {
       const room = await startRaceRoom(raceRoomId, racePlayerId);
       setRaceState(room);
+      setMode(room.mode);
       setRaceError(null);
+      router.push(pathForMode(room.mode));
       startSession();
     } catch (error) {
       setRaceError((error as Error).message);
@@ -2013,6 +2365,7 @@ export default function App() {
       setTournamentState(data);
       setTournamentLookupId(data.id);
       setTournamentError(null);
+      router.push(pathForMode(data.mode));
     } catch (error) {
       setTournamentError((error as Error).message);
     }
@@ -2064,6 +2417,8 @@ export default function App() {
       });
       setTournamentState(nextState);
       setTournamentError(null);
+      setMode(nextState.mode);
+      router.push(pathForMode(nextState.mode));
     } catch (error) {
       setTournamentError((error as Error).message);
     }
@@ -2402,6 +2757,8 @@ export default function App() {
 
   async function enqueueRankedFlow(): Promise<void> {
     if (!accountToken) return;
+    setDuelQueueAction("ranked");
+    setDuelNote("Joining ranked queue...");
     if (!liveSocialEnabled) {
       setDuelNote(socialLaunchNote);
       return;
@@ -2409,6 +2766,7 @@ export default function App() {
     try {
       const result = await enqueueRanked(accountToken);
       setRankedStatus(result.status);
+      setDuelNote(result.duel ? "Ranked duel found." : `Ranked queue: ${result.status}`);
       if (result.duel) {
         setActiveDuel(result.duel);
       }
@@ -2419,6 +2777,8 @@ export default function App() {
 
   async function enqueueDuelFlow(): Promise<void> {
     if (!accountToken) return;
+    setDuelQueueAction("casual");
+    setDuelNote("Joining casual duel...");
     if (!liveSocialEnabled) {
       setDuelNote(socialLaunchNote);
       return;
@@ -2426,6 +2786,7 @@ export default function App() {
     try {
       const result = await enqueueCasualDuel(accountToken);
       setRankedStatus(result.status);
+      setDuelNote(result.duel ? "Casual duel found." : `Casual queue: ${result.status}`);
       if (result.duel) {
         setActiveDuel(result.duel);
       }
@@ -2435,6 +2796,7 @@ export default function App() {
   }
 
   async function refreshRankedStatus(): Promise<void> {
+    setDuelQueueAction("status");
     if (!liveSocialEnabled) {
       setRankedStatus("idle");
       return;
@@ -2443,6 +2805,7 @@ export default function App() {
     try {
       const status = await fetchRankedStatus(accountToken);
       setRankedStatus(status.status);
+      setDuelNote(`Queue: ${status.status}`);
       if (status.duel) {
         setActiveDuel(status.duel);
       }
@@ -3207,12 +3570,13 @@ export default function App() {
 
   function spawnMeteorWord(yPercent?: number, speed?: number) {
     const runtime = runtimeRef.current;
-    const word = playPool[Math.floor(Math.random() * playPool.length)] ?? "signal";
+    const sourcePool = playPool.filter((candidate) => candidate.length <= 8);
+    const word = sourcePool[Math.floor(Math.random() * sourcePool.length)] ?? "signal";
     runtime.meteorWordId += 1;
 
     // Spawn near/off the top so meteors travel farther before reaching the floor.
     const spawnY = yPercent ?? -26 + Math.random() * 14;
-    const spawnSpeed = speed ?? 6 + Math.random() * 5;
+    const spawnSpeed = speed ?? 4.2 + Math.random() * 3.6;
 
     runtime.meteorWords.push({
       id: runtime.meteorWordId,
@@ -3228,9 +3592,9 @@ export default function App() {
     runtime.meteorWords = [];
     runtime.meteorWordId = 0;
 
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < 4; i += 1) {
       const y = -20 + Math.random() * 22;
-      const speed = 6 + Math.random() * 4;
+      const speed = 4 + Math.random() * 2.8;
       spawnMeteorWord(y, speed);
     }
 
@@ -3266,6 +3630,7 @@ export default function App() {
     runSamplesRef.current = [];
     keyEventsRef.current = [];
     keyIntervalsRef.current = [];
+    submittedHistoryRef.current = [];
     lastKeyTsRef.current = 0;
     echoPendingRef.current = null;
     rogueBuffsRef.current = {
@@ -3288,6 +3653,7 @@ export default function App() {
     currentIndexRef.current = 0;
     setCurrentIndex(0);
     setWordResults([]);
+    setCodeLineStarts({});
     setMeteorWordsView([]);
     setMeteorSelection({ id: null, typed: "" });
     setLaserFx([]);
@@ -3337,7 +3703,7 @@ export default function App() {
     }
 
     if (mode === "quote") {
-      let quote = QUOTES[Math.floor(Math.random() * QUOTES.length)] ?? "Calm typing beats rushed typing every time.";
+      let quote = pickQuote();
       if (!settings.punctuation) {
         quote = quote.replace(/[.,!?;:]/g, "");
       }
@@ -3351,15 +3717,7 @@ export default function App() {
     }
 
     if (mode === "code") {
-      const snippet =
-        CODE_SNIPPETS[Math.floor(Math.random() * CODE_SNIPPETS.length)] ?? CODE_SNIPPETS[0] ?? "";
-      const nextWords = snippet
-        .replace(/[{}()[\];,.]/g, " ")
-        .split(/\s+/)
-        .map((word) => word.trim())
-        .filter(Boolean);
-      promptWordsRef.current = nextWords;
-      setPromptWords(nextWords);
+      setStructuredCodePrompt(220);
       return;
     }
 
@@ -3426,7 +3784,7 @@ export default function App() {
         }
 
         if (mode === "duel") {
-          const targetWpm = Math.max(40, (ghostRuns.duel?.wpm ?? bestByMode.duel ?? 82) * 0.92);
+          const targetWpm = Math.max(40, (ghostRuns.duel?.wpm ?? bestByMode.duel ?? 82) * (activeModeTuning.rivalPace / 100));
           const rivalChars = ((targetWpm / 60) * 5 * elapsed) * (0.96 + Math.sin(elapsed * 0.8) * 0.08);
           const rivalProgress = clamp((rivalChars / Math.max(1, runtime.correctChars + 120)) * 100, 0, 100);
           setDuelRivalProgress(rivalProgress);
@@ -3466,8 +3824,9 @@ export default function App() {
 
   function startMeteorLoop() {
     const runtime = runtimeRef.current;
-    if (runtime.meteorWords.length < 5) {
-      for (let i = runtime.meteorWords.length; i < 5; i += 1) {
+    const targetDensity = Math.round(clamp(activeModeTuning.density, 3, 7));
+    if (runtime.meteorWords.length < targetDensity) {
+      for (let i = runtime.meteorWords.length; i < targetDensity; i += 1) {
         spawnMeteorWord();
       }
       setMeteorWordsView([...runtime.meteorWords]);
@@ -3486,9 +3845,10 @@ export default function App() {
       current.meteorSpawnClock += dt;
       const difficulty = meteorDifficulty(current);
 
-      while (current.meteorSpawnClock >= difficulty.spawnIntervalSec) {
+      const spawnInterval = difficulty.spawnIntervalSec / clamp(activeModeTuning.density / 4, 0.75, 1.75);
+      while (current.meteorSpawnClock >= spawnInterval) {
         spawnMeteorWord();
-        current.meteorSpawnClock -= difficulty.spawnIntervalSec;
+        current.meteorSpawnClock -= spawnInterval;
       }
 
       const nextWords: MeteorWord[] = [];
@@ -3700,7 +4060,7 @@ export default function App() {
       const scorePayload = {
         sessionId: runtime.sessionId,
         mode,
-        username: accountProfile?.handle?.trim() || authHandle.trim() || username.trim() || "player",
+        username: accountProfile?.handle?.trim() || authHandle.trim() || username.trim() || raceName.trim() || "guest",
         wpm: Number(summary.wpm.toFixed(2)),
         raw: Number(summary.raw.toFixed(2)),
         accuracy: Number(summary.accuracy.toFixed(2)),
@@ -3779,6 +4139,21 @@ export default function App() {
     const isInfectedWord = infectedIndices.includes(index);
 
     const runtime = runtimeRef.current;
+    const snapshot: SubmittedWordSnapshot = {
+      index,
+      typed,
+      result: wordResults[index],
+      correctChars: runtime.correctChars,
+      wrongChars: runtime.wrongChars,
+      rawChars: runtime.rawChars,
+      errors: runtime.errors,
+      streak: runtime.streak,
+      maxStreak: runtime.maxStreak,
+      completedWords: runtime.completedWords,
+      chainCombo,
+      infectedIndices: [...infectedIndices],
+      echoPending: echoPendingRef.current,
+    };
     const result = compareWords(typed, target);
     runtime.correctChars += result.correct;
     runtime.wrongChars += result.wrong;
@@ -3786,14 +4161,16 @@ export default function App() {
     logReplayEvent("submit", "submit", typed === target);
 
     const perfect = typed === target;
+    submittedHistoryRef.current = [...submittedHistoryRef.current.slice(-24), snapshot];
     if (perfect) {
       runtime.completedWords += 1;
       let keepStreak = true;
       if (mode === "pulse" || mode === "duel" || mode === "chart") {
         const timing = pulseTiming(runtime, pulseBpm);
-        const perfectWindow = mode === "chart" ? 0.04 : 0.055;
-        const greatWindow = mode === "chart" ? 0.08 : 0.11;
-        const okWindow = mode === "chart" ? 0.14 : 0.18;
+        const strictnessScale = clamp(1.3 - activeModeTuning.strictness * 0.12, 0.62, 1.18);
+        const perfectWindow = (mode === "chart" ? 0.04 : 0.055) * strictnessScale;
+        const greatWindow = (mode === "chart" ? 0.08 : 0.11) * strictnessScale;
+        const okWindow = (mode === "chart" ? 0.14 : 0.18) * strictnessScale;
         if (timing.distanceSec <= perfectWindow) {
           runtime.correctChars += Math.max(2, Math.floor(target.length * 0.9));
           showPulseJudge(
@@ -3838,7 +4215,8 @@ export default function App() {
         setInfectedIndices((prev) => prev.filter((value) => value !== index));
       }
       if (mode === "coop") {
-        setCoopTurn((prev) => (prev === 1 ? 2 : 1));
+        const teamSize = Math.round(clamp(activeModeTuning.teamSize, 2, 4));
+        setCoopTurn((prev) => (prev >= teamSize ? 1 : prev + 1));
       }
     } else {
       let ignoreError = false;
@@ -3870,8 +4248,10 @@ export default function App() {
       if (mode === "infection") {
         setInfectedIndices((prev) => {
           const next = new Set(prev);
-          next.add(index + 1);
-          next.add(index + 2);
+          const spread = Math.round(clamp(activeModeTuning.spread, 1, 4));
+          for (let offset = 1; offset <= spread; offset += 1) {
+            next.add(index + offset);
+          }
           return [...next].filter((value) => value < words.length + 500);
         });
       }
@@ -3886,7 +4266,7 @@ export default function App() {
     }
 
     if (mode === "relay" && !perfect) {
-      const rollbackIndex = Math.max(0, index - 2);
+      const rollbackIndex = Math.max(0, index - Math.round(clamp(activeModeTuning.spread, 1, 4)));
       currentIndexRef.current = rollbackIndex;
       setCurrentIndex(rollbackIndex);
       clearInput();
@@ -3908,7 +4288,12 @@ export default function App() {
     currentIndexRef.current = nextIndex;
     setCurrentIndex(nextIndex);
 
-    if (mode === "rogue" && perfect && runtime.completedWords > 0 && runtime.completedWords % 20 === 0) {
+    if (
+      mode === "rogue" &&
+      perfect &&
+      runtime.completedWords > 0 &&
+      runtime.completedWords % Math.round(clamp(activeModeTuning.perkEvery, 8, 30)) === 0
+    ) {
       const offers = rogueOffers();
       setRogueOffer(offers);
       showPulseJudge("PICK A PERK (1-3)", "ok");
@@ -3916,7 +4301,7 @@ export default function App() {
 
     if (mode !== "quote" && nextIndex >= words.length - 50) {
       setPromptWords((prev) => {
-        const next = [...prev, ...takeWords(80)];
+        const next = mode === "code" ? appendStructuredCodePrompt(prev, 80) : [...prev, ...takeWords(80)];
         promptWordsRef.current = next;
         return next;
       });
@@ -3930,6 +4315,42 @@ export default function App() {
 
     clearInput();
     updateLiveStats();
+  }
+
+  function undoSubmittedWord() {
+    const snapshot = submittedHistoryRef.current.pop();
+    if (!snapshot || runtimeRef.current.status === "finished") {
+      return false;
+    }
+    const runtime = runtimeRef.current;
+    runtime.correctChars = snapshot.correctChars;
+    runtime.wrongChars = snapshot.wrongChars;
+    runtime.rawChars = snapshot.rawChars;
+    runtime.errors = snapshot.errors;
+    runtime.streak = snapshot.streak;
+    runtime.maxStreak = snapshot.maxStreak;
+    runtime.completedWords = snapshot.completedWords;
+    currentIndexRef.current = snapshot.index;
+    setCurrentIndex(snapshot.index);
+    typedRef.current = snapshot.typed;
+    pendingPreviewRef.current = snapshot.typed;
+    setTypedPreview(snapshot.typed);
+    setWordResults((prev) => {
+      const next = [...prev];
+      if (snapshot.result == null) {
+        delete next[snapshot.index];
+      } else {
+        next[snapshot.index] = snapshot.result;
+      }
+      return next;
+    });
+    echoPendingRef.current = snapshot.echoPending;
+    setEchoPending(snapshot.echoPending);
+    setInfectedIndices(snapshot.infectedIndices);
+    setChainCombo(snapshot.chainCombo);
+    logReplayEvent("backspace", "Undo submit", true);
+    updateLiveStats();
+    return true;
   }
 
   function clearInput() {
@@ -3968,6 +4389,8 @@ export default function App() {
         typedRef.current = typedRef.current.slice(0, -1);
         scheduleTypedPreview(typedRef.current);
         logReplayEvent("backspace", "Backspace", true);
+      } else {
+        undoSubmittedWord();
       }
       return;
     }
@@ -3982,7 +4405,11 @@ export default function App() {
     }
 
     if (event.key.length !== 1) return;
-    if (!/^[a-zA-Z0-9.,!?;:'"-]$/.test(event.key)) return;
+    const allowedKey =
+      mode === "code"
+        ? /^[a-zA-Z0-9.,!?;:'"`$()[\]{}<>+=*/_-]$/.test(event.key)
+        : /^[a-zA-Z0-9.,!?;:'"-]$/.test(event.key);
+    if (!allowedKey) return;
 
     if (runtime.status === "finished") {
       resetSession(false);
@@ -4043,7 +4470,7 @@ export default function App() {
             runtime.maxStreak = Math.max(runtime.maxStreak, runtime.streak);
             runtime.meteorWords = runtime.meteorWords.filter((word) => word.id !== target.id);
             triggerExplosion(target);
-            if (runtime.meteorWords.length < 5) {
+            if (runtime.meteorWords.length < Math.round(clamp(activeModeTuning.density, 3, 7))) {
               spawnMeteorWord();
             }
           }
@@ -4106,7 +4533,7 @@ export default function App() {
         triggerExplosion(lockWord);
         runtime.meteorLockId = null;
         runtime.meteorBuffer = "";
-        if (runtime.meteorWords.length < 5) {
+        if (runtime.meteorWords.length < Math.round(clamp(activeModeTuning.density, 3, 7))) {
           spawnMeteorWord();
         }
         setMeteorWordsView([...runtime.meteorWords]);
@@ -4473,10 +4900,15 @@ export default function App() {
     label: MODE_META[modeId].label,
     flavor: MODE_META[modeId].flavor,
     detail: MODE_DETAILS[modeId],
+    family: MODE_META[modeId].family,
+    difficulty: MODE_META[modeId].difficulty,
+    rule: MODE_META[modeId].rule,
+    recommended: MODE_META[modeId].recommended,
     best: (bestByMode[modeId] ?? 0).toFixed(1),
   }));
 
   const selectedGameMode = modeFromPathname(pathname || "/");
+  const activeModeMeta = MODE_META[mode];
   const showDistrictStack = appRoute === "settings";
   const showArena = appRoute === "play" && selectedGameMode !== null;
   const atlasLayoutClass = showArena
@@ -4486,7 +4918,9 @@ export default function App() {
       : "atlas-layout atlas-layout--single";
   const focusModeActive = showArena && isRunning && focusPrefs.enabled;
   const cipherSignedShift = cipherDirection === "forward" ? cipherShift : -cipherShift;
-  const gravityFlip = mode === "gravity" && Math.floor(stats.elapsedSec / 6) % 2 === 1;
+  const gravityFlip =
+    mode === "gravity" &&
+    Math.floor(stats.elapsedSec / Math.max(2, activeModeTuning.intervalSec)) % 2 === 1;
   const pulseState =
     mode === "pulse" || mode === "duel" || mode === "chart"
       ? pulseTiming(runtimeRef.current, pulseBpm)
@@ -4513,8 +4947,16 @@ export default function App() {
                 <Link
                   key={route}
                   href={pathForRoute(route)}
-                  className={`site-nav-link ${appRoute === route ? "active" : ""}`}
-                  aria-current={appRoute === route ? "page" : undefined}
+                  className={`site-nav-link ${
+                    appRoute === route || (route === "settings" && (appRoute === "profile" || appRoute === "privacy"))
+                      ? "active"
+                      : ""
+                  }`}
+                  aria-current={
+                    appRoute === route || (route === "settings" && (appRoute === "profile" || appRoute === "privacy"))
+                      ? "page"
+                      : undefined
+                  }
                 >
                   <span className="site-nav-label">{ROUTE_LABELS[route]}</span>
                   <span className="site-nav-hint sr-only">{ROUTE_COPY[route].title}</span>
@@ -4524,17 +4966,6 @@ export default function App() {
           ))}
         </nav>
         <div className="site-tools">
-          {accountProfile ? (
-            <Link href={pathForProfileSubroute("account")} className="auth-chip signed-in">
-              <span>Account</span>
-              <strong>{accountProfile.handle}</strong>
-            </Link>
-          ) : (
-            <Link href={pathForProfileSubroute("account")} className="auth-chip guest">
-              <span>Guest</span>
-              <strong>Sign in</strong>
-            </Link>
-          )}
           <button
             className="theme-toggle"
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -4544,6 +4975,15 @@ export default function App() {
           >
             <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
           </button>
+          {accountProfile ? (
+            <button className="auth-chip signed-in" onClick={() => void logoutCurrentAccountFlow()}>
+              <strong>Log out</strong>
+            </button>
+          ) : (
+            <Link href={pathForProfileSubroute("account")} className="auth-chip guest">
+              <strong>Sign in</strong>
+            </Link>
+          )}
         </div>
       </header>
 
@@ -4556,11 +4996,20 @@ export default function App() {
             </div>
             <div className="games-grid">
               {playModeCards.map((entry) => (
-                <Link key={entry.id} href={pathForMode(entry.id)} className={`game-library-card game-library-card--${entry.id}`}>
+                <Link
+                  key={entry.id}
+                  href={pathForMode(entry.id)}
+                  className={`game-library-card game-library-card--${entry.id} game-library-card--${entry.family}`}
+                >
                   <span className="game-card-glyph" aria-hidden="true">{MODE_GLYPHS[entry.id]}</span>
                   <span className="game-card-copy">
+                    <span className="game-card-kicker">
+                      {entry.family} · {entry.difficulty}
+                    </span>
                     <strong>{entry.label}</strong>
                     <span>{entry.flavor}</span>
+                    <small>{entry.rule}</small>
+                    <em>{entry.recommended.durationSec}s · {entry.recommended.pack}</em>
                   </span>
                   <span className="game-card-arrow" aria-hidden="true">→</span>
                 </Link>
@@ -4609,38 +5058,38 @@ export default function App() {
                 </select>
               </label>
               <div className="toggle-grid">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={settings.punctuation}
-                    onChange={(e) => setSettings((s) => ({ ...s, punctuation: e.target.checked }))}
-                  />
+                <button
+                  type="button"
+                  className={`toggle-pill ${settings.punctuation ? "active" : ""}`}
+                  aria-pressed={settings.punctuation}
+                  onClick={() => setSettings((s) => ({ ...s, punctuation: !s.punctuation }))}
+                >
                   Punctuation
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={settings.numbers}
-                    onChange={(e) => setSettings((s) => ({ ...s, numbers: e.target.checked }))}
-                  />
+                </button>
+                <button
+                  type="button"
+                  className={`toggle-pill ${settings.numbers ? "active" : ""}`}
+                  aria-pressed={settings.numbers}
+                  onClick={() => setSettings((s) => ({ ...s, numbers: !s.numbers }))}
+                >
                   Numbers
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={settings.lowercase}
-                    onChange={(e) => setSettings((s) => ({ ...s, lowercase: e.target.checked }))}
-                  />
+                </button>
+                <button
+                  type="button"
+                  className={`toggle-pill ${settings.lowercase ? "active" : ""}`}
+                  aria-pressed={settings.lowercase}
+                  onClick={() => setSettings((s) => ({ ...s, lowercase: !s.lowercase }))}
+                >
                   Lowercase lock
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={settings.customOnly}
-                    onChange={(e) => setSettings((s) => ({ ...s, customOnly: e.target.checked }))}
-                  />
+                </button>
+                <button
+                  type="button"
+                  className={`toggle-pill ${settings.customOnly ? "active" : ""}`}
+                  aria-pressed={settings.customOnly}
+                  onClick={() => setSettings((s) => ({ ...s, customOnly: !s.customOnly }))}
+                >
                   Custom only
-                </label>
+                </button>
               </div>
               <p className="dictionary-note">{dictionaryStatus}</p>
               {mode === "cipher" && (
@@ -4879,7 +5328,7 @@ export default function App() {
 
         {showArena && (
           <section
-            className="arena-frame"
+            className={`arena-frame arena-frame--${activeModeMeta.family} arena-frame--mode-${mode}`}
             id="typing-arena"
             ref={arenaRef}
             tabIndex={-1}
@@ -4891,6 +5340,242 @@ export default function App() {
             <span className="adaptive-music-readout" aria-label={`Adaptive music ${adaptiveMusicRef.current.bpm} beats per minute`}>
               <i aria-hidden="true" /> Adaptive music · {adaptiveMusicRef.current.bpm} BPM
             </span>
+          </div>
+          <div className="mode-brief-panel">
+            <div>
+              <span>{activeModeMeta.family} · {activeModeMeta.difficulty}</span>
+              <strong>{activeModeMeta.objective}</strong>
+              <p>{activeModeMeta.rule}</p>
+            </div>
+            <button className="ghost-btn" onClick={() => applyRecommendedModeSetup(mode)}>
+              Use recommended setup
+            </button>
+          </div>
+          <div className="play-tuning-panel" aria-label="Run tuning">
+            <label>
+              Time
+              <select value={durationSec} onChange={(event) => setDurationSec(Number(event.target.value))}>
+                <option value={30}>30s</option>
+                <option value={60}>60s</option>
+                <option value={90}>90s</option>
+                <option value={120}>120s</option>
+              </select>
+            </label>
+            <label>
+              Pack
+              <select value={dictionaryPack} onChange={(event) => setDictionaryPack(event.target.value as DictionaryPack)}>
+                <option value="core">Core</option>
+                <option value="tech">Tech</option>
+                <option value="top1k">Top 1K</option>
+                <option value="top5k">Top 5K</option>
+                <option value="top10k">Top 10K</option>
+                <option value="verbs">Verbs</option>
+                <option value="nouns">Nouns</option>
+                <option value="code">Code</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className={`toggle-pill ${settings.punctuation ? "active" : ""}`}
+              aria-pressed={settings.punctuation}
+              onClick={() => setSettings((prev) => ({ ...prev, punctuation: !prev.punctuation }))}
+            >
+              Punctuation
+            </button>
+            <button
+              type="button"
+              className={`toggle-pill ${settings.numbers ? "active" : ""}`}
+              aria-pressed={settings.numbers}
+              onClick={() => setSettings((prev) => ({ ...prev, numbers: !prev.numbers }))}
+            >
+              Numbers
+            </button>
+            <button
+              type="button"
+              className={`toggle-pill ${settings.lowercase ? "active" : ""}`}
+              aria-pressed={settings.lowercase}
+              onClick={() => setSettings((prev) => ({ ...prev, lowercase: !prev.lowercase }))}
+            >
+              Lowercase
+            </button>
+            <button
+              type="button"
+              className={`toggle-pill ${settings.customOnly ? "active" : ""}`}
+              aria-pressed={settings.customOnly}
+              onClick={() => setSettings((prev) => ({ ...prev, customOnly: !prev.customOnly }))}
+            >
+              Custom only
+            </button>
+            <label>
+              Word shape
+              <select
+                value={activeModeTuning.wordShape}
+                onChange={(event) => updateActiveModeTuning({ wordShape: event.target.value as WordShape })}
+              >
+                <option value="compact">Compact</option>
+                <option value="balanced">Balanced</option>
+                <option value="wide">Wide</option>
+                <option value="wild">Wild</option>
+              </select>
+            </label>
+            <label>
+              Intensity
+              <input
+                type="range"
+                min={1}
+                max={5}
+                step={1}
+                value={activeModeTuning.intensity}
+                onChange={(event) => updateActiveModeTuning({ intensity: Number(event.target.value) })}
+              />
+            </label>
+            {(mode === "pulse" || mode === "duel" || mode === "chart") && (
+              <>
+                <label>
+                  BPM
+                  <input
+                    type="range"
+                    min={70}
+                    max={180}
+                    step={1}
+                    value={pulseBpm}
+                    onChange={(event) => setPulseBpm(clamp(Number(event.target.value), 70, 180))}
+                  />
+                </label>
+                <label>
+                  Beat window
+                  <input
+                    type="range"
+                    min={1}
+                    max={5}
+                    step={1}
+                    value={activeModeTuning.strictness}
+                    onChange={(event) => updateActiveModeTuning({ strictness: Number(event.target.value) })}
+                  />
+                </label>
+              </>
+            )}
+            {mode === "duel" && (
+              <label>
+                Rival pace
+                <input
+                  type="range"
+                  min={70}
+                  max={125}
+                  step={1}
+                  value={activeModeTuning.rivalPace}
+                  onChange={(event) => updateActiveModeTuning({ rivalPace: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {mode === "meteor" && (
+              <label>
+                Herd density
+                <input
+                  type="range"
+                  min={3}
+                  max={7}
+                  step={1}
+                  value={activeModeTuning.density}
+                  onChange={(event) => updateActiveModeTuning({ density: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {mode === "gravity" && (
+              <label>
+                Flip interval
+                <input
+                  type="range"
+                  min={2}
+                  max={12}
+                  step={1}
+                  value={activeModeTuning.intervalSec}
+                  onChange={(event) => updateActiveModeTuning({ intervalSec: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {(mode === "blackout" || mode === "stealth") && (
+              <label>
+                Reveal edge
+                <input
+                  type="range"
+                  min={0}
+                  max={3}
+                  step={1}
+                  value={activeModeTuning.reveal}
+                  onChange={(event) => updateActiveModeTuning({ reveal: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {(mode === "infection" || mode === "relay") && (
+              <label>
+                {mode === "infection" ? "Spread" : "Rollback"}
+                <input
+                  type="range"
+                  min={1}
+                  max={4}
+                  step={1}
+                  value={activeModeTuning.spread}
+                  onChange={(event) => updateActiveModeTuning({ spread: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {mode === "rogue" && (
+              <label>
+                Perk cadence
+                <input
+                  type="range"
+                  min={8}
+                  max={30}
+                  step={1}
+                  value={activeModeTuning.perkEvery}
+                  onChange={(event) => updateActiveModeTuning({ perkEvery: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {mode === "coop" && (
+              <label>
+                Pilots
+                <input
+                  type="range"
+                  min={2}
+                  max={4}
+                  step={1}
+                  value={activeModeTuning.teamSize}
+                  onChange={(event) => updateActiveModeTuning({ teamSize: Number(event.target.value) })}
+                />
+              </label>
+            )}
+            {mode === "code" && (
+              <>
+                <label>
+                  Language
+                  <select
+                    value={codeLanguage}
+                    onChange={(event) => {
+                      setCodeLanguage(event.target.value as CodeLanguage);
+                    }}
+                  >
+                    <option value="typescript">TypeScript</option>
+                    <option value="python">Python</option>
+                    <option value="rust">Rust</option>
+                    <option value="sql">SQL</option>
+                  </select>
+                </label>
+                <label>
+                  Layout
+                  <select
+                    value={codeIndentMode}
+                    onChange={(event) => {
+                      setCodeIndentMode(event.target.value as CodeIndentMode);
+                    }}
+                  >
+                    <option value="preserve">Preserve indentation</option>
+                    <option value="flat">Flat tokens</option>
+                  </select>
+                </label>
+              </>
+            )}
           </div>
           <div className="arena-glow" />
           <div className="arena-headline">
@@ -4953,9 +5638,10 @@ export default function App() {
             <div
               className={`prompt-shell ${
                 mode === "reverse" || gravityFlip ? "reverse-flow" : ""
-              } ${mode === "pulse" || mode === "duel" || mode === "chart" ? "rhythm-prompt" : ""}`}
+              } ${mode === "pulse" || mode === "duel" || mode === "chart" ? "rhythm-prompt" : ""} prompt-shell--${mode}`}
             >
               {visibleWords.map(({ word, index }) => {
+                const codeIndent = mode === "code" ? codeLineStarts[index] : undefined;
                 const displayWord = index === currentIndex && mode === "echo" && echoPending ? echoPending : word;
                 const encodedWord =
                   mode === "cipher" ? encodeCipherWord(displayWord, cipherSignedShift) : displayWord;
@@ -4964,12 +5650,18 @@ export default function App() {
                     ? maskInnerLetters(encodedWord)
                     : encodedWord;
                 const driftX =
-                  mode === "drift" ? Math.sin(stats.elapsedSec * 2.4 + index * 0.62) * 12 : 0;
+                  mode === "drift"
+                    ? Math.sin(stats.elapsedSec * (1.6 + activeModeTuning.intensity * 0.32) + index * 0.62) *
+                      (5 + activeModeTuning.intensity * 3.5)
+                    : 0;
                 const infected = mode === "infection" && infectedIndices.includes(index);
                 if (index < currentIndex) {
                   return (
+                    <Fragment key={`${index}-${word}`}>
+                      {codeIndent != null && (
+                        <span className="code-line-break" style={{ "--indent": codeIndent } as CSSProperties} />
+                      )}
                     <span
-                      key={`${index}-${word}`}
                       className={`prompt-word ${wordResults[index] === "good" ? "good" : "bad"} ${
                         infected ? "infected" : ""
                       }`}
@@ -4977,22 +5669,31 @@ export default function App() {
                     >
                       {shownWord}
                     </span>
+                    </Fragment>
                   );
                 }
                 if (index === currentIndex) {
                   return (
+                    <Fragment key={`${index}-${word}`}>
+                      {codeIndent != null && (
+                        <span className="code-line-break" style={{ "--indent": codeIndent } as CSSProperties} />
+                      )}
                     <span
-                      key={`${index}-${word}`}
                       className={`prompt-word current ${infected ? "infected" : ""}`}
                       style={mode === "drift" ? { transform: `translateX(${driftX}px)` } : undefined}
                     >
+                      {mode === "coop" && <span className="word-badge">P{coopTurn}</span>}
+                      {infected && <span className="word-badge word-badge--danger">infected</span>}
                       {displayWord.split("").map((char, charIndex) => {
                         const typedChar = typedPreview[charIndex];
                         const encodedChar = mode === "cipher" ? encodeCipherWord(char, cipherSignedShift) : char;
+                        const revealCount = Math.round(clamp(activeModeTuning.reveal, 0, 3));
                         const shownChar =
-                          mode === "blackout"
+                          mode === "blackout" && typedChar !== undefined && charIndex >= revealCount
                             ? "•"
-                            : mode === "stealth" && charIndex > 0 && charIndex < displayWord.length - 1
+                            : mode === "stealth" &&
+                                charIndex >= revealCount &&
+                                charIndex < displayWord.length - revealCount
                               ? "•"
                               : encodedChar;
                         if (typedChar === undefined) {
@@ -5019,16 +5720,22 @@ export default function App() {
                         <span className="extra">{typedPreview.slice(displayWord.length)}</span>
                       )}
                     </span>
+                    </Fragment>
                   );
                 }
                 return (
+                  <Fragment key={`${index}-${word}`}>
+                    {codeIndent != null && (
+                      <span className="code-line-break" style={{ "--indent": codeIndent } as CSSProperties} />
+                    )}
                   <span
-                    key={`${index}-${word}`}
                     className={`prompt-word future ${infected ? "infected" : ""}`}
                     style={mode === "drift" ? { transform: `translateX(${driftX}px)` } : undefined}
                   >
+                    {infected && <span className="word-badge word-badge--danger">infected</span>}
                     {shownWord}
                   </span>
+                  </Fragment>
                 );
               })}
             </div>
@@ -5193,59 +5900,28 @@ export default function App() {
               </>
             )}
           </div>
-          {mode !== "meteor" && (
-            <p className="meteor-tip">Type anywhere. Space submits a word. Backspace edits.</p>
-          )}
-          {mode === "relay" && (
-            <p className="meteor-tip">Relay rule: mistakes push you two words backward.</p>
-          )}
-          {mode === "cipher" && (
-            <p className="meteor-tip">
-              Cipher rule: all letters are shifted {cipherDirection} by {cipherShift}. Type the decoded word.
+          <div className="mode-rule-grid">
+            <p>
+              <span>Input</span>
+              {mode === "meteor"
+                ? "Type matching letters to lock targets. Space banks progress."
+                : "Type anywhere. Space submits a word. Backspace edits or undoes the last submit."}
             </p>
-          )}
-          {mode === "pulse" && (
-            <p className="meteor-tip">Rhythm rule: submit each word on beat. Better timing gives bigger bonus.</p>
-          )}
-          {mode === "duel" && (
-            <p className="meteor-tip">Duel rule: keep rhythm while racing the rival progress bar.</p>
-          )}
-          {mode === "chart" && (
-            <p className="meteor-tip">Chart rule: stricter beat windows than Pulse. Precision matters.</p>
-          )}
-          {mode === "echo" && (
-            <p className="meteor-tip">Echo rule: after each clear, repeat the previous word from memory.</p>
-          )}
-          {mode === "rogue" && (
-            <p className="meteor-tip">Rogue rule: every 20 words opens a perk draft. Use keys 1-3 to pick.</p>
-          )}
-          {mode === "drift" && (
-            <p className="meteor-tip">Drift rule: words slide horizontally while you type.</p>
-          )}
-          {mode === "reverse" && (
-            <p className="meteor-tip">Reverse rule: reading order flips right-to-left.</p>
-          )}
-          {mode === "blackout" && (
-            <p className="meteor-tip">Blackout rule: letters are masked while typing.</p>
-          )}
-          {mode === "chain" && <p className="meteor-tip">Chain combo: x{chainCombo}</p>}
-          {mode === "gravity" && (
-            <p className="meteor-tip">Gravity rule: direction flips every few seconds.</p>
-          )}
-          {mode === "coop" && <p className="meteor-tip">Co-op relay: Player {coopTurn} turn.</p>}
-          {mode === "infection" && (
-            <p className="meteor-tip">Infection rule: errors infect nearby words until you clear them.</p>
-          )}
-          {mode === "stealth" && (
-            <p className="meteor-tip">Stealth rule: middle letters are hidden.</p>
-          )}
-          {mode === "coach" && (
-            <p className="meteor-tip">Coach mode: weak patterns are boosted in the word stream.</p>
-          )}
-          {mode === "code" && (
-            <p className="meteor-tip">Code mode: syntax-heavy dictionary and snippets.</p>
-          )}
-          <p className="meteor-tip">{ghostStatus}</p>
+            <p>
+              <span>Rule</span>
+              {activeModeMeta.rule}
+            </p>
+            <p>
+              <span>Scoring</span>
+              {activeModeMeta.scoring}
+              {mode === "chain" ? ` Current combo x${chainCombo}.` : ""}
+              {mode === "coop" ? ` Active pilot ${coopTurn}.` : ""}
+            </p>
+            <p>
+              <span>Ghost</span>
+              {ghostStatus}
+            </p>
+          </div>
           {mode === "rogue" && rogueOffer && (
             <div className="rogue-offers">
               {rogueOffer.map((offer, offerIndex) => (
@@ -5290,10 +5966,10 @@ export default function App() {
                 <div>
                   <p className="home-eyebrow">Typing platform</p>
                   <h2>Fast drills, weird modes, and a front page that finally feels sorted out.</h2>
-                  <p>
-                    Home stays calm. Play is now the one place where you pick a mode and launch it, while boards,
-                    lab, profile, and settings keep their own pages.
-                  </p>
+              <p>
+                Home stays calm. Play is now the one place where you pick a mode and launch it, while boards,
+                lab, profile, and settings keep their own pages.
+              </p>
                   <div className="hero-pill-row">
                     <span className="hero-pill">{GAME_MODES.length} modes</span>
                     <span className="hero-pill">{dictionaryPack.toUpperCase()} active pack</span>
@@ -5382,7 +6058,7 @@ export default function App() {
               </article>
               <article>
                 <h3>Modes with character</h3>
-                <p>Meteor and rhythm now look and sound like their own modes instead of sharing one generic shell.</p>
+                <p>Elephant Run and rhythm modes now look and sound like their own games instead of sharing one shell.</p>
               </article>
             </section>
           )}
@@ -5410,15 +6086,42 @@ export default function App() {
                   Open profile
                 </button>
               </div>
-              <p className="dim">
-                Current mode: <strong>{MODE_META[mode].label}</strong> · Best{" "}
-                <strong>{(bestByMode[mode] ?? 0).toFixed(1)} WPM</strong>
-              </p>
-              {dailyChallenge && (
+              <div className="quick-launch-meta">
                 <p className="dim">
-                  Daily: {dailyChallenge.mode} · {dailyChallenge.durationSec}s · {dailyChallenge.dictionaryPack}
+                  Current mode: <strong>{MODE_META[mode].label}</strong> · Best{" "}
+                  <strong>{(bestByMode[mode] ?? 0).toFixed(1)} WPM</strong>
                 </p>
-              )}
+                {dailyChallenge && (
+                  <p className="dim">
+                    Daily: {MODE_META[dailyChallenge.mode].label} · {dailyChallenge.durationSec}s ·{" "}
+                    {dailyChallenge.dictionaryPack}
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
+
+          {appRoute === "home" && (
+            <section className="leaderboard-block">
+              <h3>Stats</h3>
+              <div className="profile-stat-grid">
+                <article>
+                  <span>Local runs</span>
+                  <strong>{localProfileSummary.runs}</strong>
+                </article>
+                <article>
+                  <span>Average WPM</span>
+                  <strong>{localProfileSummary.avgWpm.toFixed(1)}</strong>
+                </article>
+                <article>
+                  <span>Best lane</span>
+                  <strong>{MODE_META[localProfileSummary.bestMode].label}</strong>
+                </article>
+                <article>
+                  <span>Best WPM</span>
+                  <strong>{localProfileSummary.bestWpm.toFixed(1)}</strong>
+                </article>
+              </div>
             </section>
           )}
 
@@ -5800,13 +6503,25 @@ export default function App() {
               <h3>Ranked + Duel</h3>
               {!liveSocialEnabled && <p className="dim">{socialLaunchNote}</p>}
               <div className="custom-actions">
-                <button className="launch-btn" disabled={!accountToken} onClick={() => void enqueueRankedFlow()}>
+                <button
+                  className={duelQueueAction === "ranked" ? "launch-btn" : "ghost-btn"}
+                  disabled={!accountToken}
+                  onClick={() => void enqueueRankedFlow()}
+                >
                   Ranked queue
                 </button>
-                <button className="ghost-btn" disabled={!accountToken} onClick={() => void enqueueDuelFlow()}>
+                <button
+                  className={duelQueueAction === "casual" ? "launch-btn" : "ghost-btn"}
+                  disabled={!accountToken}
+                  onClick={() => void enqueueDuelFlow()}
+                >
                   Casual duel
                 </button>
-                <button className="ghost-btn" disabled={!accountToken} onClick={() => void refreshRankedStatus()}>
+                <button
+                  className={duelQueueAction === "status" ? "launch-btn" : "ghost-btn"}
+                  disabled={!accountToken}
+                  onClick={() => void refreshRankedStatus()}
+                >
                   Status
                 </button>
               </div>
@@ -5966,6 +6681,17 @@ export default function App() {
                 User deletion removes account-owned sessions, preferences, webhooks, replays, friend requests, and score
                 rows. Leaderboard removal deletes only the selected score row.
               </p>
+              <div className="admin-seed-strip">
+                <div>
+                  <strong>Leaderboard bots</strong>
+                  <p className="dim profile-note">
+                    Adds or updates 12 synthetic, uncertified bot rows across a few modes. Requires the metrics token.
+                  </p>
+                </div>
+                <button className="ghost-btn" onClick={() => void seedAdminBotRows()}>
+                  Seed bots
+                </button>
+              </div>
               <div className="admin-grid">
                 <article className="profile-subcard admin-panel">
                   <div className="profile-subcard-head">
@@ -6053,12 +6779,29 @@ export default function App() {
                 </article>
               </div>
               {adminNote && <p className="dim profile-note">{adminNote}</p>}
+              <article className="profile-subcard admin-panel pack-qa-panel">
+                <h4>Pack QA</h4>
+                <p className="dim profile-note">
+                  Counts and samples come from the same dictionary builder used by live runs.
+                </p>
+                <div className="pack-qa-grid">
+                  {dictionaryQaRows.map((row) => (
+                    <div key={`pack-qa-${row.pack}`} className="pack-qa-card">
+                      <div>
+                        <strong>{row.pack}</strong>
+                        <span>{row.count.toLocaleString()} words</span>
+                      </div>
+                      <p>{row.sample.join(" ")}</p>
+                    </div>
+                  ))}
+                </div>
+              </article>
             </section>
           )}
 
-          {(appRoute === "settings" || appRoute === "home") && (
+          {appRoute === "settings" && (
             <section className="stats-block">
-              <h3>Stats</h3>
+              <h3>Run Stats</h3>
               <div className="stat-grid">
                 {statCards.map((card) => (
                   <article key={card.key}>
@@ -6077,6 +6820,25 @@ export default function App() {
                   </article>
                 ))}
               </div>
+            </section>
+          )}
+
+          {appRoute === "settings" && (
+            <section className="path-grid settings-hub-grid">
+              <article className="path-card">
+                <h3>Account</h3>
+                <p>Sign in, manage sessions, friends, duels, replays, webhooks, and admin tools.</p>
+                <button className="ghost-btn" onClick={() => navigateToRoute("profile")}>
+                  Open account settings
+                </button>
+              </article>
+              <article className="path-card">
+                <h3>Privacy</h3>
+                <p>Choose local storage, anonymous usage stats, cookies, and analytics review.</p>
+                <button className="ghost-btn" onClick={() => navigateToRoute("privacy")}>
+                  Open privacy settings
+                </button>
+              </article>
             </section>
           )}
 
@@ -6134,7 +6896,6 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={consentDraft.analytics}
-                        disabled={doNotTrackEnabled}
                         onChange={(event) =>
                           setConsentDraft((prev) => ({ ...prev, analytics: event.target.checked }))
                         }
@@ -6152,8 +6913,8 @@ export default function App() {
                 </article>
                 <article>
                   <span>Browser signal</span>
-                  <strong>{doNotTrackEnabled ? "Privacy signal on" : "No privacy signal"}</strong>
-                  <p>{doNotTrackEnabled ? "Anonymous usage stats stay disabled." : "You can choose aggregate stats manually."}</p>
+                  <strong>{doNotTrackEnabled ? "Privacy signal detected" : "No privacy signal"}</strong>
+                  <p>{doNotTrackEnabled ? "Your manual choice here still controls TypeShift analytics." : "You can choose aggregate stats manually."}</p>
                 </article>
                 <article>
                   <span>Storage still used</span>
@@ -6683,7 +7444,7 @@ export default function App() {
           <div className="consent-actions">
             <button
               className="launch-btn"
-              onClick={() => applyPrivacyConsent({ analytics: !doNotTrackEnabled, preferences: true })}
+              onClick={() => applyPrivacyConsent({ analytics: true, preferences: true })}
             >
               Allow anonymous stats
             </button>

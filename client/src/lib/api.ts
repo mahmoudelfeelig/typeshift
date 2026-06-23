@@ -108,6 +108,14 @@ export interface AdminLeaderboardResponse {
   entries: AdminLeaderboardEntry[];
 }
 
+export interface SeedBotsResponse {
+  ok: true;
+  bots: number;
+  modes: Mode[];
+  rows: number;
+  handles: string[];
+}
+
 export interface DailyChallenge {
   id: string;
   date: string;
@@ -1124,4 +1132,16 @@ export async function deleteAdminLeaderboardScore(
     headers: { Authorization: `Bearer ${token}` },
   });
   return parseJson<{ ok: true; deleted: true }>(response);
+}
+
+export async function seedBotLeaderboard(metricsToken: string, botCount = 12): Promise<SeedBotsResponse> {
+  const response = await fetch("/api/v1/admin/seed-bots", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-metrics-token": metricsToken,
+    },
+    body: JSON.stringify({ botCount }),
+  });
+  return parseJson<SeedBotsResponse>(response);
 }

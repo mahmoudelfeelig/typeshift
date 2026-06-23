@@ -17,6 +17,7 @@
     "backup:db": "bash ./scripts/backup-db.sh",
     "restore:db": "bash ./scripts/restore-db.sh",
     "restore:drill": "bash ./scripts/restore-drill.sh",
+    "seed:bots": "node scripts/seed-bots.mjs",
     "smoke:check": "bash ./scripts/smoke-check.sh",
     "start": "node scripts/start.mjs"
   },

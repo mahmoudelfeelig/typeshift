@@ -45,6 +45,24 @@ const MATCH_MAX_RATING_GAP = 250;
 const WEBHOOK_EVENT_ALLOWLIST = new Set(["score.submitted", "challenge.submitted", "webhook.test"]);
 const challengeModes: Mode[] = ["time", "relay", "pulse", "cipher", "duel"];
 const challengeDurations = [45, 60, 75, 90];
+const botSeedModes: Mode[] = ["time", "quote", "pulse", "relay", "code", "meteor"];
+const botSeedHandles = [
+  "NovaKeys",
+  "DashPilot",
+  "MiraByte",
+  "OrbitLane",
+  "EchoVale",
+  "PixelRook",
+  "JunoShift",
+  "VectorKai",
+  "RileyRun",
+  "TaroType",
+  "MossSignal",
+  "ZedTempo",
+  "IvySyntax",
+  "KodaFlux",
+  "RuneCaps",
+];
 
 interface RuntimeEnv {
   DB?: D1Database;
@@ -1159,6 +1177,112 @@ async function listLeaderboard(
     certified: rowBoolean(row.certified),
     createdAt: toIso(rowNumber(row.created_at)),
   }));
+}
+
+function seededBotScore(handle: string, botIndex: number, mode: Mode, modeIndex: number, nowMs: number): MemoryLeaderboardScore {
+  const baseline = 43 + botIndex * 1.7 + modeIndex * 2.9;
+  const accuracy = Math.min(99.4, 91.5 + ((botIndex * 7 + modeIndex * 3) % 70) / 10);
+  const wpm = Number((baseline + ((botIndex + modeIndex) % 4) * 1.4).toFixed(1));
+  const raw = Number((wpm + 4.5 + (modeIndex % 3) * 1.1).toFixed(1));
+  const errors = Math.max(0, Math.round((100 - accuracy) / 2));
+  const durationMs = mode === "quote" ? 75_000 + botIndex * 850 : 60_000;
+  return {
+    id: `seed-bot-${handle.toLowerCase()}-${mode}`,
+    sessionId: `seed-bot-session-${handle.toLowerCase()}-${mode}`,
+    accountId: null,
+    username: handle,
+    mode,
+    wpm,
+    raw,
+    accuracy: Number(accuracy.toFixed(1)),
+    errors,
+    streak: Math.max(8, Math.round((wpm * accuracy) / 120)),
+    durationMs,
+    certified: false,
+    clientVersion: "seed-bot-v1",
+    telemetry: {
+      typedChars: Math.round((raw * durationMs) / 12_000),
+      correctChars: Math.round((wpm * accuracy * durationMs) / 1_200_000),
+      wrongChars: errors,
+      avgKeyIntervalMs: Math.max(55, Math.round(240 - wpm * 1.8)),
+      burstKps: Number((5.2 + modeIndex * 0.35).toFixed(2)),
+      idleRatio: Number((0.06 + (botIndex % 5) * 0.015).toFixed(2)),
+      source: "seed-bot",
+    },
+    createdAtMs: nowMs - (botIndex * botSeedModes.length + modeIndex) * 4_200_000,
+  };
+}
+
+async function seedBotLeaderboard(request: Request, ctx: RequestContext, body: Record<string, unknown>): Promise<Response> {
+  if (!authorizeAnalyticsSummary(request, ctx)) {
+    unauthorized("Seed access requires metrics token");
+  }
+  const botCount = body.botCount == null ? 12 : parseInteger(body.botCount, { min: 1, max: 15 });
+  const modesRequested =
+    Array.isArray(body.modes) && body.modes.length > 0
+      ? body.modes.map((mode) => {
+          if (!isMode(mode)) {
+            badRequest("Invalid seed mode");
+          }
+          return mode;
+        })
+      : botSeedModes;
+  const modes = modesRequested.slice(0, 6);
+  const scores = botSeedHandles
+    .slice(0, botCount)
+    .flatMap((handle, botIndex) => modes.map((mode, modeIndex) => seededBotScore(handle, botIndex, mode, modeIndex, ctx.nowMs)));
+
+  if (!ctx.env.DB) {
+    const memory = getMemoryState();
+    const byId = new Map(memory.leaderboardScores.map((score) => [score.id, score]));
+    for (const score of scores) {
+      byId.set(score.id, score);
+    }
+    memory.leaderboardScores = [...byId.values()];
+  } else {
+    for (const score of scores) {
+      await dbRun(
+        ctx.env.DB,
+        `INSERT INTO leaderboard_scores (
+           id, session_id, account_id, username, mode, wpm, raw, accuracy, errors, streak, duration_ms, certified, client_version, telemetry_json, created_at
+         ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           username = excluded.username,
+           mode = excluded.mode,
+           wpm = excluded.wpm,
+           raw = excluded.raw,
+           accuracy = excluded.accuracy,
+           errors = excluded.errors,
+           streak = excluded.streak,
+           duration_ms = excluded.duration_ms,
+           certified = excluded.certified,
+           client_version = excluded.client_version,
+           telemetry_json = excluded.telemetry_json,
+           created_at = excluded.created_at`,
+        score.id,
+        score.sessionId,
+        score.username,
+        score.mode,
+        score.wpm,
+        score.raw,
+        score.accuracy,
+        score.errors,
+        score.streak,
+        score.durationMs,
+        score.clientVersion,
+        JSON.stringify(score.telemetry),
+        score.createdAtMs,
+      );
+    }
+  }
+
+  return json({
+    ok: true,
+    bots: botCount,
+    modes,
+    rows: scores.length,
+    handles: botSeedHandles.slice(0, botCount),
+  });
 }
 
 function serializeChallengeEntry(score: MemoryChallengeScore, index: number): Record<string, unknown> {
@@ -3857,6 +3981,10 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
 
     if (path.length === 3 && path[0] === "admin" && path[1] === "leaderboard" && request.method === "DELETE") {
       return await deleteAdminLeaderboardScore(request, ctx, decodeURIComponent(path[2] ?? ""));
+    }
+
+    if (path.length === 2 && path[0] === "admin" && path[1] === "seed-bots" && request.method === "POST") {
+      return await seedBotLeaderboard(request, ctx, await readJson(request));
     }
 
     if (path.length === 2 && path[0] === "replay" && path[1] === "share" && request.method === "POST") {

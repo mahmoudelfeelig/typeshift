@@ -96,6 +96,7 @@ METRICS_TOKEN=replace-with-a-private-admin-token
 - `npm run build`: OpenNext Cloudflare build
 - `npm run preview:worker`: local Wrangler preview
 - `npm run deploy:worker`: build + deploy to Cloudflare Workers
+- `METRICS_TOKEN=... npm run seed:bots -- https://typeshift.elfeel.me`: add/update capped synthetic leaderboard rows
 - `npm run smoke:check -- <url>`: health and challenge smoke test
 
 ## Deployment Notes
@@ -126,8 +127,15 @@ The repo includes:
 - D1 Time Travel is your short-window rollback path
 - `.github/workflows/backup.yml` exports SQL backups to the `typeshift-backups` R2 bucket daily
 - `/api/v1/privacy/analytics/summary` is protected by `METRICS_TOKEN` in production
+- `/api/v1/admin/seed-bots` is protected by `METRICS_TOKEN` in production and upserts a capped set of uncertified bot leaderboard rows
 - Workers observability is enabled in `client/wrangler.jsonc`
 - Legal routes are published at `/privacy-policy`, `/cookies`, and `/terms`
+
+## Word Data
+
+- `client/public/data/english-2-12.txt` is the broad alphabetical source dictionary used for fallback fills and domain-derived packs.
+- `client/public/data/english-frequency-10k.txt` is a cleaned ranked-frequency list derived from `first20hours/google-10000-english`, used for `top1k`, `top5k`, and `top10k`.
+- Admin users can inspect live pack counts and sample words from Profile -> Admin -> Pack QA.
 
 ## Notes
 

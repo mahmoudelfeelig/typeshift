@@ -13,6 +13,10 @@ check "$BASE_URL/api/health"
 check "$BASE_URL/api/health/live"
 check "$BASE_URL/api/health/ready"
 check "$BASE_URL/api/v1/challenge/daily"
+check "$BASE_URL/data/english-frequency-10k.txt"
+check "$BASE_URL/api/v1/leaderboard?mode=time&limit=15&certifiedOnly=false"
+check "$BASE_URL/api/v1/season/current"
+check "$BASE_URL/api/v1/season/leaderboard?limit=15"
 
 curl -fsS "$BASE_URL/api/v1/race/create" \
   -H 'content-type: application/json' \
