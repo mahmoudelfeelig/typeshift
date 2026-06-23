@@ -3771,6 +3771,19 @@ body,
   margin-bottom: 0.25rem;
 }
 
+.compact-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: min(260px, 100%);
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.compact-field input {
+  min-height: 2.75rem;
+}
+
 .pack-qa-panel {
   margin-top: 1rem;
 }

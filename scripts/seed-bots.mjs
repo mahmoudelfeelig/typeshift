@@ -1,8 +1,9 @@
 const baseUrl = (process.argv[2] ?? process.env.TYPESHIFT_URL ?? "https://typeshift.elfeel.me").replace(/\/$/, "");
-const token = process.env.METRICS_TOKEN;
+const accountToken = process.env.ACCOUNT_TOKEN;
+const seedToken = process.env.BOT_SEED_TOKEN;
 
-if (!token) {
-  console.error("METRICS_TOKEN is required.");
+if (!accountToken || !seedToken) {
+  console.error("ACCOUNT_TOKEN and BOT_SEED_TOKEN are required.");
   process.exit(1);
 }
 
@@ -10,7 +11,8 @@ const response = await fetch(`${baseUrl}/api/v1/admin/seed-bots`, {
   method: "POST",
   headers: {
     "content-type": "application/json",
-    "x-metrics-token": token,
+    authorization: `Bearer ${accountToken}`,
+    "x-bot-seed-token": seedToken,
   },
   body: JSON.stringify({ botCount: 12 }),
 });

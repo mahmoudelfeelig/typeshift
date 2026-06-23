@@ -1190,6 +1190,7 @@ export default function App() {
   const [consentDraft, setConsentDraft] = useState({ analytics: false, preferences: false });
   const [privacyNote, setPrivacyNote] = useState<string | null>(null);
   const [analyticsAdminToken, setAnalyticsAdminToken] = useState("");
+  const [botSeedToken, setBotSeedToken] = useState("");
   const [analyticsSummaryRows, setAnalyticsSummaryRows] = useState<AnalyticsSummaryRow[]>([]);
   const [analyticsSummaryTotals, setAnalyticsSummaryTotals] = useState<Record<string, number>>({});
   const [analyticsSummaryLoading, setAnalyticsSummaryLoading] = useState(false);
@@ -1816,18 +1817,22 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([loadLargeDictionary(), loadFrequencyDictionary()])
-      .then(([words, rankedWords]) => {
+    Promise.allSettled([loadLargeDictionary(), loadFrequencyDictionary()])
+      .then(([wordsResult, rankedWordsResult]) => {
         if (cancelled) return;
+        const words = wordsResult.status === "fulfilled" ? wordsResult.value : [];
+        const rankedWords = rankedWordsResult.status === "fulfilled" ? rankedWordsResult.value : [];
         setLargeWords(words);
         setFrequencyWords(rankedWords);
-        setDictionaryStatus(
-          `Dictionary loaded: ${rankedWords.length.toLocaleString()} ranked + ${words.length.toLocaleString()} source words`,
-        );
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setDictionaryStatus("Using built-in word packs.");
+        if (words.length > 0 || rankedWords.length > 0) {
+          setDictionaryStatus(
+            `Dictionary loaded: ${
+              rankedWords.length > 0 ? rankedWords.length.toLocaleString() : "ranked fallback"
+            } ranked + ${words.length > 0 ? words.length.toLocaleString() : "source fallback"} source words`,
+          );
+        } else {
+          setDictionaryStatus("Using built-in word packs.");
+        }
       });
     return () => {
       cancelled = true;
@@ -2207,14 +2212,14 @@ export default function App() {
   }
 
   async function seedAdminBotRows(): Promise<void> {
-    if (!isAnalyticsAdmin) return;
-    const token = analyticsAdminToken.trim();
+    if (!isAnalyticsAdmin || !accountToken) return;
+    const token = botSeedToken.trim();
     if (!token && !isDevEnvironment) {
-      setAdminNote("Enter the metrics token before seeding bot rows.");
+      setAdminNote("Enter the bot seed token before seeding bot rows.");
       return;
     }
     try {
-      const result = await seedBotLeaderboard(token, 12);
+      const result = await seedBotLeaderboard(accountToken, token, 12);
       setAdminNote(`Seeded ${result.rows} rows for ${result.bots} bots.`);
       await Promise.all([refreshAdminLeaderboardRows(), refreshLeaderboard(true), refreshChallengeAndSeason(true)]);
     } catch (error) {
@@ -4083,6 +4088,7 @@ export default function App() {
             challengeDate: dailyChallenge.date,
           },
           runtime.sessionToken,
+          accountToken || undefined,
         )
           .then((result) => {
             setChallengeNote(`Challenge submitted: +${result.points} pts`);
@@ -4101,6 +4107,7 @@ export default function App() {
             telemetry,
           },
           runtime.sessionToken,
+          accountToken || undefined,
         )
           .then(() => refreshLeaderboard(true))
           .catch(() => {
@@ -6685,10 +6692,19 @@ export default function App() {
                 <div>
                   <strong>Leaderboard bots</strong>
                   <p className="dim profile-note">
-                    Adds or updates 12 synthetic, uncertified bot rows across a few modes. Requires the metrics token.
+                    Adds or updates 12 synthetic, uncertified bot rows across a few modes. Requires the bot seed token.
                   </p>
                 </div>
-                <button className="ghost-btn" onClick={() => void seedAdminBotRows()}>
+                <label className="compact-field">
+                  Seed token
+                  <input
+                    type="password"
+                    value={botSeedToken}
+                    onChange={(event) => setBotSeedToken(event.target.value)}
+                    placeholder={isDevEnvironment ? "Optional in dev" : "Required"}
+                  />
+                </label>
+                <button className="ghost-btn" disabled={!accountToken} onClick={() => void seedAdminBotRows()}>
                   Seed bots
                 </button>
               </div>

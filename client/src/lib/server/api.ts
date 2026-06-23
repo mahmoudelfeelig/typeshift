@@ -66,9 +66,11 @@ const botSeedHandles = [
 
 interface RuntimeEnv {
   DB?: D1Database;
+  RATE_LIMIT_KV?: KVNamespace;
   JWT_SESSION_SECRET?: string;
   TURNSTILE_SECRET_KEY?: string;
   METRICS_TOKEN?: string;
+  BOT_SEED_TOKEN?: string;
   USAGE_ANALYTICS?: AnalyticsEngineDataset;
   NEXTJS_ENV?: string;
   NEXT_PUBLIC_ADMIN_HANDLES?: string;
@@ -95,6 +97,12 @@ interface Fingerprint {
   ipHash: string;
   userAgentHash: string;
   userAgent: string;
+}
+
+interface RateLimitRule {
+  key: string;
+  limit: number;
+  windowSec: number;
 }
 
 interface ChallengeDefinition {
@@ -378,10 +386,13 @@ function logRouteError(request: Request, path: string, error: unknown): void {
   console.error(JSON.stringify(payload));
 }
 
-function requireSecret(env: RuntimeEnv): string {
+function requireSecret(env: RuntimeEnv, isProduction: boolean): string {
   const secret = env.JWT_SESSION_SECRET?.trim();
   if (secret) {
     return secret;
+  }
+  if (isProduction) {
+    unavailable("JWT session secret is not configured");
   }
   return "typeshift-local-dev-secret";
 }
@@ -400,12 +411,32 @@ async function getFingerprint(request: Request, secret: string): Promise<Fingerp
 }
 
 function getRuntimeContext(env: RuntimeEnv): RequestContext {
+  const isProduction = (env.NEXTJS_ENV ?? process.env.NODE_ENV) === "production";
   return {
     env,
     nowMs: Date.now(),
-    secret: requireSecret(env),
-    isProduction: (env.NEXTJS_ENV ?? process.env.NODE_ENV) === "production",
+    secret: requireSecret(env, isProduction),
+    isProduction,
   };
+}
+
+async function enforceRateLimit(request: Request, ctx: RequestContext, rule: RateLimitRule): Promise<void> {
+  if (!ctx.env.RATE_LIMIT_KV) {
+    if (ctx.isProduction) {
+      unavailable("Rate limiting is not configured");
+    }
+    return;
+  }
+  const fingerprint = await getFingerprint(request, ctx.secret);
+  const bucket = Math.floor(ctx.nowMs / (rule.windowSec * 1000));
+  const key = `rate:${rule.key}:${bucket}:${fingerprint.ipHash.slice(0, 32)}`;
+  const current = Number((await ctx.env.RATE_LIMIT_KV.get(key)) ?? "0");
+  if (current >= rule.limit) {
+    throw new HttpError(429, "Too many requests");
+  }
+  await ctx.env.RATE_LIMIT_KV.put(key, String(current + 1), {
+    expirationTtl: rule.windowSec + 10,
+  });
 }
 
 async function verifyTurnstileIfRequired(
@@ -1075,14 +1106,10 @@ async function consumeGameplaySession(
   }
 }
 
-async function incrementVerifiedRunsByHandle(
-  ctx: RequestContext,
-  handle: string,
-): Promise<void> {
-  const normalized = normalizeUsername(handle).toLowerCase();
+async function incrementVerifiedRunsByAccountId(ctx: RequestContext, accountId: string): Promise<void> {
   if (!ctx.env.DB) {
     const memory = getMemoryState();
-    const account = memory.accountsByHandle.get(normalized);
+    const account = memory.accountsById.get(accountId);
     if (account && !account.deletedAtMs) {
       account.verifiedRuns += 1;
       account.updatedAtMs = ctx.nowMs;
@@ -1094,11 +1121,39 @@ async function incrementVerifiedRunsByHandle(
     `UPDATE accounts
         SET verified_runs = verified_runs + 1,
             updated_at = ?
-      WHERE handle_normalized = ?
+      WHERE id = ?
         AND deleted_at IS NULL`,
     ctx.nowMs,
-    normalized,
+    accountId,
   );
+}
+
+async function getScoreAccount(request: Request, ctx: RequestContext): Promise<AccountIdentity | null> {
+  const token = request.headers.get("x-account-token") ?? "";
+  if (!token.trim()) {
+    return null;
+  }
+  const claims = await verifyAccountToken(token.trim(), ctx.secret);
+  if (!claims) {
+    unauthorized("Invalid account token");
+  }
+  const account = await getAuthedAccount(new Request(request.url, { headers: { authorization: `Bearer ${token.trim()}` } }), ctx);
+  if (!account) {
+    unauthorized("Invalid account token");
+  }
+  return account;
+}
+
+function assertScoreAccountCanUsePayload(account: AccountIdentity | null, payload: { username: string; certified: boolean }): void {
+  if (!account) {
+    if (payload.certified) {
+      unauthorized("Certified runs require sign in");
+    }
+    return;
+  }
+  if (normalizeUsername(payload.username).toLowerCase() !== normalizeUsername(account.handle).toLowerCase()) {
+    forbidden("Signed-in score username must match the account");
+  }
 }
 
 function serializeLeaderboardEntry(
@@ -1214,8 +1269,9 @@ function seededBotScore(handle: string, botIndex: number, mode: Mode, modeIndex:
 }
 
 async function seedBotLeaderboard(request: Request, ctx: RequestContext, body: Record<string, unknown>): Promise<Response> {
-  if (!authorizeAnalyticsSummary(request, ctx)) {
-    unauthorized("Seed access requires metrics token");
+  await requireAdminAccount(request, ctx);
+  if (!authorizeBotSeed(request, ctx)) {
+    unauthorized("Seed access requires bot seed token");
   }
   const botCount = body.botCount == null ? 12 : parseInteger(body.botCount, { min: 1, max: 15 });
   const modesRequested =
@@ -1539,6 +1595,18 @@ function authorizeAnalyticsSummary(request: Request, ctx: RequestContext): boole
   const headerToken = request.headers.get("x-metrics-token");
   const bearerToken = extractBearerToken(request.headers.get("authorization"));
   const candidate = headerToken ?? bearerToken ?? "";
+  return candidate.length === configuredToken.length && candidate === configuredToken;
+}
+
+function authorizeBotSeed(request: Request, ctx: RequestContext): boolean {
+  const configuredToken = ctx.env.BOT_SEED_TOKEN?.trim();
+  if (!ctx.isProduction && !configuredToken) {
+    return true;
+  }
+  if (!configuredToken) {
+    return false;
+  }
+  const candidate = request.headers.get("x-bot-seed-token") ?? "";
   return candidate.length === configuredToken.length && candidate === configuredToken;
 }
 
@@ -2113,15 +2181,15 @@ async function exportAccount(request: Request, ctx: RequestContext): Promise<Res
           events: entry.events,
           active: entry.active,
           createdAt: toIso(entry.createdAtMs),
-        })),
+      })),
       scores: memory.leaderboardScores
-        .filter((score) => score.username === account.handle)
+        .filter((score) => score.accountId === account.id)
         .map((score) => ({
           ...score,
           createdAt: toIso(score.createdAtMs),
         })),
       challengeScores: memory.challengeScores
-        .filter((score) => score.username === account.handle)
+        .filter((score) => score.accountId === account.id)
         .map((score) => ({
           ...score,
           createdAt: toIso(score.createdAtMs),
@@ -2186,19 +2254,19 @@ async function exportAccount(request: Request, ctx: RequestContext): Promise<Res
       ctx.env.DB,
       `SELECT id, session_id, account_id, username, mode, wpm, raw, accuracy, errors, streak, duration_ms, certified, client_version, telemetry_json, created_at
          FROM leaderboard_scores
-        WHERE username = ?
+        WHERE account_id = ?
         ORDER BY created_at DESC
         LIMIT 5000`,
-      account.handle,
+      account.id,
     ),
     dbAll<Record<string, unknown>>(
       ctx.env.DB,
       `SELECT id, session_id, account_id, challenge_date, season_id, username, mode, points, wpm, raw, accuracy, errors, streak, duration_ms, created_at
          FROM challenge_scores
-        WHERE username = ?
+        WHERE account_id = ?
         ORDER BY created_at DESC
         LIMIT 5000`,
-      account.handle,
+      account.id,
     ),
   ]);
 
@@ -2261,8 +2329,8 @@ async function deleteAccount(request: Request, ctx: RequestContext, body: Record
         memory.accountSessions.delete(id);
       }
     }
-    memory.leaderboardScores = memory.leaderboardScores.filter((score) => score.username !== account.handle);
-    memory.challengeScores = memory.challengeScores.filter((score) => score.username !== account.handle);
+    memory.leaderboardScores = memory.leaderboardScores.filter((score) => score.accountId !== account.id);
+    memory.challengeScores = memory.challengeScores.filter((score) => score.accountId !== account.id);
     for (const [id, replay] of memory.replayShares.entries()) {
       if (replay.accountId === account.id) {
         memory.replayShares.delete(id);
@@ -2287,8 +2355,8 @@ async function deleteAccount(request: Request, ctx: RequestContext, body: Record
     }
     return json({ ok: true, deleted: true });
   }
-  await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE username = ? OR account_id = ?`, account.handle, account.id);
-  await dbRun(ctx.env.DB, `DELETE FROM challenge_scores WHERE username = ? OR account_id = ?`, account.handle, account.id);
+  await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE account_id = ?`, account.id);
+  await dbRun(ctx.env.DB, `DELETE FROM challenge_scores WHERE account_id = ?`, account.id);
   await dbRun(ctx.env.DB, `DELETE FROM replay_shares WHERE account_id = ?`, account.id);
   await dbRun(ctx.env.DB, `DELETE FROM account_friend_requests WHERE from_account_id = ? OR to_account_id = ?`, account.id, account.id);
   await dbRun(ctx.env.DB, `DELETE FROM webhook_endpoints WHERE account_id = ?`, account.id);
@@ -2324,12 +2392,8 @@ async function listAdminUsers(request: Request, ctx: RequestContext): Promise<Re
         deletedAt: account.deletedAtMs == null ? null : toIso(account.deletedAtMs),
         sessionCount: [...memory.accountSessions.values()].filter((session) => session.accountId === account.id)
           .length,
-        scoreCount: memory.leaderboardScores.filter(
-          (score) => score.accountId === account.id || score.username.toLowerCase() === account.handle.toLowerCase(),
-        ).length,
-        challengeScoreCount: memory.challengeScores.filter(
-          (score) => score.accountId === account.id || score.username.toLowerCase() === account.handle.toLowerCase(),
-        ).length,
+        scoreCount: memory.leaderboardScores.filter((score) => score.accountId === account.id).length,
+        challengeScoreCount: memory.challengeScores.filter((score) => score.accountId === account.id).length,
         replayShareCount: [...memory.replayShares.values()].filter((replay) => replay.accountId === account.id)
           .length,
         webhookCount: [...memory.webhooks.values()].filter((webhook) => webhook.accountId === account.id).length,
@@ -2360,8 +2424,8 @@ async function listAdminUsers(request: Request, ctx: RequestContext): Promise<Re
             a.created_at,
             a.deleted_at,
             (SELECT COUNT(*) FROM account_sessions s WHERE s.account_id = a.id) AS session_count,
-            (SELECT COUNT(*) FROM leaderboard_scores ls WHERE ls.account_id = a.id OR lower(ls.username) = lower(a.handle)) AS score_count,
-            (SELECT COUNT(*) FROM challenge_scores cs WHERE cs.account_id = a.id OR lower(cs.username) = lower(a.handle)) AS challenge_score_count,
+            (SELECT COUNT(*) FROM leaderboard_scores ls WHERE ls.account_id = a.id) AS score_count,
+            (SELECT COUNT(*) FROM challenge_scores cs WHERE cs.account_id = a.id) AS challenge_score_count,
             (SELECT COUNT(*) FROM replay_shares rs WHERE rs.account_id = a.id) AS replay_share_count,
             (SELECT COUNT(*) FROM webhook_endpoints wh WHERE wh.account_id = a.id) AS webhook_count
        FROM accounts a
@@ -2421,10 +2485,10 @@ async function deleteAdminUser(
       }
     }
     memory.leaderboardScores = memory.leaderboardScores.filter(
-      (score) => score.accountId !== account.id && score.username.toLowerCase() !== account.handle.toLowerCase(),
+      (score) => score.accountId !== account.id,
     );
     memory.challengeScores = memory.challengeScores.filter(
-      (score) => score.accountId !== account.id && score.username.toLowerCase() !== account.handle.toLowerCase(),
+      (score) => score.accountId !== account.id,
     );
     for (const [id, replay] of memory.replayShares.entries()) {
       if (replay.accountId === account.id) {
@@ -2462,8 +2526,8 @@ async function deleteAdminUser(
   if (normalizeUsername(confirmHandle).toLowerCase() !== normalizeUsername(row.handle).toLowerCase()) {
     unprocessable("Handle confirmation does not match");
   }
-  await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE username = ? OR account_id = ?`, row.handle, row.id);
-  await dbRun(ctx.env.DB, `DELETE FROM challenge_scores WHERE username = ? OR account_id = ?`, row.handle, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE account_id = ?`, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM challenge_scores WHERE account_id = ?`, row.id);
   await dbRun(ctx.env.DB, `DELETE FROM replay_shares WHERE account_id = ?`, row.id);
   await dbRun(ctx.env.DB, `DELETE FROM account_friend_requests WHERE from_account_id = ? OR to_account_id = ?`, row.id, row.id);
   await dbRun(ctx.env.DB, `DELETE FROM webhook_endpoints WHERE account_id = ?`, row.id);
@@ -3698,6 +3762,8 @@ async function submitLeaderboardScore(
   if (!authToken) {
     unauthorized("Missing bearer token");
   }
+  const account = await getScoreAccount(request, ctx);
+  assertScoreAccountCanUsePayload(account, payload);
   const verified = await verifySessionToken(authToken, ctx.secret);
   if (!verified || verified.sid !== payload.sessionId || verified.mode !== payload.mode) {
     unauthorized("Invalid or expired session token");
@@ -3725,14 +3791,14 @@ async function submitLeaderboardScore(
   await consumeGameplaySession(ctx, payload.sessionId, payload.mode, fingerprint);
   const scoreId = randomId();
 
-  if (!ctx.env.DB) {
-    const memory = getMemoryState();
-    const entry: MemoryLeaderboardScore = {
-      id: scoreId,
-      sessionId: payload.sessionId,
-      accountId: null,
-      username: payload.username,
-      mode: payload.mode,
+	  if (!ctx.env.DB) {
+	    const memory = getMemoryState();
+	    const entry: MemoryLeaderboardScore = {
+	      id: scoreId,
+	      sessionId: payload.sessionId,
+	      accountId: account?.id ?? null,
+	      username: account?.handle ?? payload.username,
+	      mode: payload.mode,
       wpm: payload.wpm,
       raw: payload.raw,
       accuracy: payload.accuracy,
@@ -3750,10 +3816,11 @@ async function submitLeaderboardScore(
       ctx.env.DB,
       `INSERT INTO leaderboard_scores (
          id, session_id, account_id, username, mode, wpm, raw, accuracy, errors, streak, duration_ms, certified, client_version, telemetry_json, created_at
-       ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       scoreId,
       payload.sessionId,
-      payload.username,
+      account?.id ?? null,
+      account?.handle ?? payload.username,
       payload.mode,
       payload.wpm,
       payload.raw,
@@ -3768,7 +3835,10 @@ async function submitLeaderboardScore(
     );
   }
   if (payload.certified) {
-    await incrementVerifiedRunsByHandle(ctx, payload.username);
+    if (!account) {
+      unauthorized("Certified runs require sign in");
+    }
+    await incrementVerifiedRunsByAccountId(ctx, account.id);
   }
   return json({ ok: true }, { status: 201 });
 }
@@ -3787,6 +3857,8 @@ async function submitChallengeScore(
   if (!authToken) {
     unauthorized("Missing bearer token");
   }
+  const account = await getScoreAccount(request, ctx);
+  assertScoreAccountCanUsePayload(account, payload);
   const verified = await verifySessionToken(authToken, ctx.secret);
   if (!verified || verified.sid !== payload.sessionId || verified.mode !== payload.mode) {
     unauthorized("Invalid or expired session token");
@@ -3813,16 +3885,16 @@ async function submitChallengeScore(
   const season = getSeasonWindow(new Date(`${challengeDate}T12:00:00.000Z`));
   const points = pointsForChallengeScore(payload);
 
-  if (!ctx.env.DB) {
-    const memory = getMemoryState();
-    const entry: MemoryChallengeScore = {
-      id: scoreId,
-      sessionId: payload.sessionId,
-      accountId: null,
-      challengeDate,
-      seasonId: season.id,
-      username: payload.username,
-      mode: payload.mode,
+	  if (!ctx.env.DB) {
+	    const memory = getMemoryState();
+	    const entry: MemoryChallengeScore = {
+	      id: scoreId,
+	      sessionId: payload.sessionId,
+	      accountId: account?.id ?? null,
+	      challengeDate,
+	      seasonId: season.id,
+	      username: account?.handle ?? payload.username,
+	      mode: payload.mode,
       points,
       wpm: payload.wpm,
       raw: payload.raw,
@@ -3838,12 +3910,13 @@ async function submitChallengeScore(
       ctx.env.DB,
       `INSERT INTO challenge_scores (
          id, session_id, account_id, challenge_date, season_id, username, mode, points, wpm, raw, accuracy, errors, streak, duration_ms, created_at
-       ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       scoreId,
       payload.sessionId,
+      account?.id ?? null,
       challengeDate,
       season.id,
-      payload.username,
+      account?.handle ?? payload.username,
       payload.mode,
       points,
       payload.wpm,
@@ -3864,6 +3937,7 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
 
   try {
     if (path.length === 2 && path[0] === "session" && path[1] === "init" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "session-init", limit: 120, windowSec: 60 });
       const body = await readJson(request);
       const mode = body.mode;
       if (!isMode(mode)) {
@@ -3886,6 +3960,7 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
     }
 
     if (path.length === 2 && path[0] === "leaderboard" && path[1] === "submit" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "score-submit", limit: 80, windowSec: 60 });
       return await submitLeaderboardScore(request, ctx, await readJson(request));
     }
 
@@ -3895,6 +3970,7 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
     }
 
     if (path.length === 2 && path[0] === "challenge" && path[1] === "submit" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "challenge-submit", limit: 40, windowSec: 60 });
       return await submitChallengeScore(request, ctx, await readJson(request));
     }
 
@@ -3924,10 +4000,12 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
     }
 
     if (path.length === 2 && path[0] === "account" && path[1] === "register" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "account-register", limit: 8, windowSec: 300 });
       return await registerAccount(request, ctx, await readJson(request));
     }
 
     if (path.length === 2 && path[0] === "account" && path[1] === "login" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "account-login", limit: 20, windowSec: 300 });
       return await loginAccount(request, ctx, await readJson(request));
     }
 
@@ -4000,6 +4078,7 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
     }
 
     if (path.length === 2 && path[0] === "privacy" && path[1] === "analytics" && request.method === "POST") {
+      await enforceRateLimit(request, ctx, { key: "analytics", limit: 180, windowSec: 60 });
       return await handlePrivacyAnalytics(request, ctx, await readJson(request));
     }
 

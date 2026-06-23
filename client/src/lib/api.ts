@@ -341,6 +341,7 @@ interface CachedLeaderboardMap {
 interface QueuedScoreSubmission {
   payload: ScoreSubmissionPayload;
   token: string;
+  accountToken?: string;
   queuedAt: number;
   attempts: number;
 }
@@ -452,6 +453,7 @@ function readScoreQueue(): QueuedScoreSubmission[] {
       .map((item) => ({
         payload: item.payload,
         token: item.token,
+        ...(typeof item.accountToken === "string" && item.accountToken ? { accountToken: item.accountToken } : {}),
         queuedAt: Number(item.queuedAt) || Date.now(),
         attempts: Number(item.attempts) || 0,
       }));
@@ -468,23 +470,25 @@ function writeScoreQueue(queue: QueuedScoreSubmission[]): void {
   }
 }
 
-function enqueueScore(payload: ScoreSubmissionPayload, token: string): void {
+function enqueueScore(payload: ScoreSubmissionPayload, token: string, accountToken?: string): void {
   const queue = readScoreQueue();
   queue.push({
     payload,
     token,
+    ...(accountToken ? { accountToken } : {}),
     queuedAt: Date.now(),
     attempts: 0,
   });
   writeScoreQueue(queue);
 }
 
-async function postScoreNow(payload: ScoreSubmissionPayload, token: string): Promise<void> {
+async function postScoreNow(payload: ScoreSubmissionPayload, token: string, accountToken?: string): Promise<void> {
   const response = await fetch("/api/v1/leaderboard/submit", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
+      ...(accountToken ? { "x-account-token": accountToken } : {}),
     },
     body: JSON.stringify(payload),
   });
@@ -517,7 +521,7 @@ export async function flushQueuedScores(): Promise<void> {
     const nextQueue: QueuedScoreSubmission[] = [];
     for (const item of queue) {
       try {
-        await postScoreNow(item.payload, item.token);
+        await postScoreNow(item.payload, item.token, item.accountToken);
       } catch (error) {
         if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
           continue;
@@ -549,12 +553,12 @@ export async function initSession(mode: Mode): Promise<SessionInitResponse> {
   return parseJson<SessionInitResponse>(response);
 }
 
-export async function submitScore(payload: ScoreSubmissionPayload, token: string): Promise<void> {
+export async function submitScore(payload: ScoreSubmissionPayload, token: string, accountToken?: string): Promise<void> {
   try {
-    await postScoreNow(payload, token);
+    await postScoreNow(payload, token, accountToken);
   } catch (error) {
     if (shouldQueueScore(error)) {
-      enqueueScore(payload, token);
+      enqueueScore(payload, token, accountToken);
       return;
     }
     throw error;
@@ -602,12 +606,14 @@ export async function fetchDailyChallenge(): Promise<{
 export async function submitChallengeScore(
   payload: ChallengeSubmitPayload,
   token: string,
+  accountToken?: string,
 ): Promise<{ points: number }> {
   const response = await fetch("/api/v1/challenge/submit", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
+      ...(accountToken ? { "x-account-token": accountToken } : {}),
     },
     body: JSON.stringify(payload),
   });
@@ -1134,12 +1140,13 @@ export async function deleteAdminLeaderboardScore(
   return parseJson<{ ok: true; deleted: true }>(response);
 }
 
-export async function seedBotLeaderboard(metricsToken: string, botCount = 12): Promise<SeedBotsResponse> {
+export async function seedBotLeaderboard(accountToken: string, seedToken: string, botCount = 12): Promise<SeedBotsResponse> {
   const response = await fetch("/api/v1/admin/seed-bots", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-metrics-token": metricsToken,
+      Authorization: `Bearer ${accountToken}`,
+      "x-bot-seed-token": seedToken,
     },
     body: JSON.stringify({ botCount }),
   });

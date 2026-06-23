@@ -6,6 +6,7 @@ import { handleApiRequest } from "./api";
 const env = {
   JWT_SESSION_SECRET: "integration-test-secret-1234567890",
   NEXTJS_ENV: "test",
+  NEXT_PUBLIC_ADMIN_HANDLES: "adminseed",
 };
 
 async function requestJson<T>(
@@ -65,6 +66,115 @@ test("leaderboard session flow submits and lists a score", async () => {
   );
   assert.equal(board.status, 200);
   assert.ok(board.body.entries.some((entry) => entry.username === username && entry.wpm === 92));
+});
+
+test("signed-in scores are account-bound and certified runs cannot be anonymous", async () => {
+  const handle = `owner${Date.now().toString().slice(-6)}`;
+  const register = await requestJson<{ token: string; account: { handle: string; verifiedRuns: number } }>("account/register", {
+    method: "POST",
+    body: JSON.stringify({
+      handle,
+      password: "TestPassword123",
+      locale: "en",
+    }),
+  });
+  assert.equal(register.status, 201);
+
+  const spoofInit = await requestJson<{ sessionId: string; token: string }>("session/init", {
+    method: "POST",
+    body: JSON.stringify({ mode: "time" }),
+  });
+  const spoof = await requestJson<{ error: string }>("leaderboard/submit", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${spoofInit.body.token}`,
+      "x-account-token": register.body.token,
+    },
+    body: JSON.stringify({
+      sessionId: spoofInit.body.sessionId,
+      mode: "time",
+      username: "someoneelse",
+      wpm: 70,
+      raw: 80,
+      accuracy: 96,
+      errors: 3,
+      streak: 20,
+      durationMs: 60_000,
+      certified: false,
+    }),
+  });
+  assert.equal(spoof.status, 403);
+
+  const anonCertifiedInit = await requestJson<{ sessionId: string; token: string }>("session/init", {
+    method: "POST",
+    body: JSON.stringify({ mode: "time" }),
+  });
+  const anonCertified = await requestJson<{ error: string }>("leaderboard/submit", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${anonCertifiedInit.body.token}`,
+    },
+    body: JSON.stringify({
+      sessionId: anonCertifiedInit.body.sessionId,
+      mode: "time",
+      username: handle,
+      wpm: 70,
+      raw: 80,
+      accuracy: 96,
+      errors: 3,
+      streak: 20,
+      durationMs: 60_000,
+      certified: true,
+      telemetry: {
+        typedChars: 400,
+        correctChars: 385,
+        wrongChars: 15,
+        avgKeyIntervalMs: 120,
+        burstKps: 8,
+        idleRatio: 0.1,
+      },
+    }),
+  });
+  assert.equal(anonCertified.status, 401);
+
+  const certifiedInit = await requestJson<{ sessionId: string; token: string }>("session/init", {
+    method: "POST",
+    body: JSON.stringify({ mode: "time" }),
+  });
+  const certified = await requestJson<{ ok: true }>("leaderboard/submit", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${certifiedInit.body.token}`,
+      "x-account-token": register.body.token,
+    },
+    body: JSON.stringify({
+      sessionId: certifiedInit.body.sessionId,
+      mode: "time",
+      username: handle,
+      wpm: 70,
+      raw: 80,
+      accuracy: 96,
+      errors: 3,
+      streak: 20,
+      durationMs: 60_000,
+      certified: true,
+      telemetry: {
+        typedChars: 400,
+        correctChars: 385,
+        wrongChars: 15,
+        avgKeyIntervalMs: 120,
+        burstKps: 8,
+        idleRatio: 0.1,
+      },
+    }),
+  });
+  assert.equal(certified.status, 201);
+
+  const profile = await requestJson<{ account: { verifiedRuns: number } }>("account/me", {
+    headers: { authorization: `Bearer ${register.body.token}` },
+  });
+  assert.equal(profile.status, 200);
+  assert.equal(profile.body.account.verifiedRuns, 1);
 });
 
 test("challenge flow accepts a valid daily score and exposes it on the board", async () => {
@@ -266,6 +376,12 @@ test("privacy analytics aggregates and summarizes events", async () => {
 });
 
 test("bot seed route creates a capped realistic leaderboard dataset", async () => {
+  const admin = await requestJson<{ token: string }>("account/register", {
+    method: "POST",
+    body: JSON.stringify({ handle: "adminseed", password: "TestPassword123" }),
+  });
+  assert.equal(admin.status, 201);
+
   const seed = await requestJson<{
     ok: true;
     bots: number;
@@ -273,6 +389,7 @@ test("bot seed route creates a capped realistic leaderboard dataset", async () =
     handles: string[];
   }>("admin/seed-bots", {
     method: "POST",
+    headers: { authorization: `Bearer ${admin.body.token}` },
     body: JSON.stringify({ botCount: 14, modes: ["time", "code"] }),
   });
   assert.equal(seed.status, 200);
@@ -290,6 +407,7 @@ test("bot seed route creates a capped realistic leaderboard dataset", async () =
 
   const reseed = await requestJson<{ rows: number }>("admin/seed-bots", {
     method: "POST",
+    headers: { authorization: `Bearer ${admin.body.token}` },
     body: JSON.stringify({ botCount: 14, modes: ["time", "code"] }),
   });
   assert.equal(reseed.status, 200);

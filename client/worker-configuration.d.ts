@@ -29,7 +29,7 @@ interface Fetcher {
 
 interface KVNamespace {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string): Promise<void>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
   delete(key: string): Promise<void>;
 }
 
@@ -51,6 +51,7 @@ interface CloudflareEnv {
   JWT_SESSION_SECRET?: string;
   TURNSTILE_SECRET_KEY?: string;
   METRICS_TOKEN?: string;
+  BOT_SEED_TOKEN?: string;
   NEXTJS_ENV?: string;
   NEXT_PUBLIC_SITE_NAME?: string;
   NEXT_PUBLIC_SITE_URL?: string;
