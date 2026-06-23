@@ -211,6 +211,66 @@ textarea:focus-visible {
   flex: 0 0 auto;
 }
 
+.auth-chip {
+  min-height: 2.25rem;
+  border: 2px solid var(--line);
+  border-radius: 7px;
+  background: #f8f2dd;
+  color: var(--text);
+  box-shadow: 3px 3px 0 #0c6b62;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.24rem 0.45rem;
+  text-decoration: none;
+  font-family: var(--font-ui), var(--font-body), sans-serif;
+}
+
+.auth-chip span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.64rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.auth-chip strong {
+  display: block;
+  max-width: 8rem;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-chip-main {
+  color: inherit;
+  text-decoration: none;
+}
+
+.auth-chip.signed-in {
+  box-shadow: 3px 3px 0 #ef4e32;
+}
+
+.auth-chip-action {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #15130f;
+  color: #f8f2dd;
+  padding: 0.34rem 0.48rem;
+  box-shadow: none;
+  font-size: 0.72rem;
+}
+
+.auth-chip.guest:hover,
+.auth-chip-main:hover,
+.auth-chip-action:hover {
+  transform: translateY(-1px);
+}
+
 .settings-card select,
 .settings-card input:not([type="checkbox"]):not([type="radio"]),
 .custom-block textarea,
@@ -1643,6 +1703,33 @@ button:hover,
 .profile-section {
   display: grid;
   gap: 12px;
+}
+
+.account-state-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.22), transparent 48%),
+    var(--surface-2);
+  box-shadow: 5px 5px 0 var(--line);
+  padding: 1rem;
+}
+
+.account-state-card h4 {
+  margin: 0.15rem 0 0.2rem;
+  font-family: var(--font-display), var(--font-body), sans-serif;
+  font-size: 1.45rem;
+}
+
+.account-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
 }
 
 .profile-tabs-panel {
@@ -3688,6 +3775,174 @@ body,
   }
 }
 
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.admin-panel {
+  min-width: 0;
+}
+
+.admin-list {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.2rem;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--surface-strong), transparent 18%);
+}
+
+.admin-row div {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.admin-row span,
+.admin-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-row small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.admin-row .danger-btn {
+  min-width: 5.2rem;
+  padding-inline: 0.7rem;
+}
+
+@media (max-width: 900px) {
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .admin-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-row .danger-btn {
+    width: 100%;
+  }
+}
+
+/* Navigation and action cleanup: compact, scannable, and resistant to text overflow. */
+.site-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.78rem;
+}
+
+.site-nav {
+  justify-self: center;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.site-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.site-nav-link {
+  min-width: 4.7rem;
+  padding: 0.56rem 0.72rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.site-tools {
+  justify-self: end;
+  min-width: 0;
+}
+
+.auth-chip {
+  max-width: 9rem;
+  min-height: 2.05rem;
+  padding: 0.22rem 0.5rem;
+}
+
+.auth-chip strong {
+  max-width: 6.8rem;
+}
+
+button,
+.launch-btn,
+.ghost-btn {
+  min-height: 2.35rem;
+  max-width: 100%;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.custom-actions {
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.profile-tabs-panel {
+  padding: 0.85rem;
+}
+
+.profile-tab-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.6rem, 1fr));
+  gap: 0.55rem;
+}
+
+.profile-tab-link {
+  justify-content: center;
+  min-height: 2.3rem;
+  margin: 0;
+  text-align: center;
+}
+
+@media (max-width: 920px) {
+  .site-header {
+    grid-template-columns: 1fr auto;
+  }
+
+  .brand-mark {
+    min-width: 0;
+  }
+
+  .site-nav {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
+
+@media (max-width: 560px) {
+  .site-nav-link {
+    min-width: 4.35rem;
+    padding-inline: 0.55rem;
+  }
+
+  .auth-chip span {
+    display: none;
+  }
+}
+
 /* Final contrast pass: keep late duplicated rules from washing out text in either theme. */
 .launch-btn,
 :root[data-theme="light"] .launch-btn {
@@ -4323,6 +4578,25 @@ textarea {
   .site-nav-link {
     width: 100%;
     padding: 0.54rem 0.62rem;
+  }
+
+  .site-tools {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .auth-chip {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .account-state-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .account-state-actions {
+    justify-content: flex-start;
   }
 
   .consent-banner {

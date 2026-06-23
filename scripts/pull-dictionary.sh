@@ -33,7 +33,7 @@ awk '
   }
 ' "$SOURCE_FILE" | sort -u > "$FILTERED_TMP"
 
-head -n 50000 "$FILTERED_TMP" > "$OUT_FILE"
+cp "$FILTERED_TMP" "$OUT_FILE"
 mkdir -p "$(dirname "$CLIENT_COPY_FILE")"
 cp "$OUT_FILE" "$CLIENT_COPY_FILE"
 

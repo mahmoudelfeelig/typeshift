@@ -69,6 +69,45 @@ export interface LeaderboardResponse {
   entries: LeaderboardEntry[];
 }
 
+export interface AdminUserEntry {
+  id: string;
+  handle: string;
+  rating: number;
+  locale: string;
+  verifiedRuns: number;
+  createdAt: string;
+  deletedAt: string | null;
+  sessionCount: number;
+  scoreCount: number;
+  challengeScoreCount: number;
+  replayShareCount: number;
+  webhookCount: number;
+}
+
+export interface AdminLeaderboardEntry {
+  id: string;
+  sessionId: string;
+  accountId: string | null;
+  username: string;
+  mode: Mode;
+  wpm: number;
+  raw: number;
+  accuracy: number;
+  errors: number;
+  streak: number;
+  durationMs: number;
+  certified: boolean;
+  createdAt: string;
+}
+
+export interface AdminUsersResponse {
+  users: AdminUserEntry[];
+}
+
+export interface AdminLeaderboardResponse {
+  entries: AdminLeaderboardEntry[];
+}
+
 export interface DailyChallenge {
   id: string;
   date: string;
@@ -1030,4 +1069,59 @@ export async function fetchAnalyticsSummary(input: {
     headers,
   });
   return parseJson<AnalyticsSummaryResponse>(response);
+}
+
+export async function fetchAdminUsers(
+  token: string,
+  input: { query?: string; limit?: number } = {},
+): Promise<AdminUsersResponse> {
+  const query = new URLSearchParams();
+  if (input.query?.trim()) {
+    query.set("query", input.query.trim());
+  }
+  query.set("limit", String(input.limit ?? 30));
+  const response = await fetch(`/api/v1/admin/users?${query.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<AdminUsersResponse>(response);
+}
+
+export async function deleteAdminUser(
+  token: string,
+  accountId: string,
+  confirmHandle: string,
+): Promise<{ ok: true; deleted: true }> {
+  const response = await fetch(`/api/v1/admin/users/${encodeURIComponent(accountId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+    body: JSON.stringify({ confirmHandle }),
+  });
+  return parseJson<{ ok: true; deleted: true }>(response);
+}
+
+export async function fetchAdminLeaderboard(
+  token: string,
+  input: { query?: string; mode?: Mode | "all"; limit?: number } = {},
+): Promise<AdminLeaderboardResponse> {
+  const query = new URLSearchParams();
+  if (input.query?.trim()) {
+    query.set("query", input.query.trim());
+  }
+  query.set("mode", input.mode ?? "all");
+  query.set("limit", String(input.limit ?? 50));
+  const response = await fetch(`/api/v1/admin/leaderboard?${query.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<AdminLeaderboardResponse>(response);
+}
+
+export async function deleteAdminLeaderboardScore(
+  token: string,
+  scoreId: string,
+): Promise<{ ok: true; deleted: true }> {
+  const response = await fetch(`/api/v1/admin/leaderboard/${encodeURIComponent(scoreId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parseJson<{ ok: true; deleted: true }>(response);
 }

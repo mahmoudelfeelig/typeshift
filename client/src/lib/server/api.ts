@@ -53,6 +53,7 @@ interface RuntimeEnv {
   METRICS_TOKEN?: string;
   USAGE_ANALYTICS?: AnalyticsEngineDataset;
   NEXTJS_ENV?: string;
+  NEXT_PUBLIC_ADMIN_HANDLES?: string;
 }
 
 interface RequestContext {
@@ -95,10 +96,12 @@ interface SeasonWindow {
 
 class HttpError extends Error {
   status: number;
+  details?: Record<string, unknown> | undefined;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, details?: Record<string, unknown>) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -114,8 +117,8 @@ function unauthorized(message = "Unauthorized"): never {
   throw new HttpError(401, message);
 }
 
-function forbidden(message: string): never {
-  throw new HttpError(403, message);
+function forbidden(message: string, details?: Record<string, unknown>): never {
+  throw new HttpError(403, message, details);
 }
 
 function notFound(message: string): never {
@@ -351,6 +354,7 @@ function logRouteError(request: Request, path: string, error: unknown): void {
     url: request.url,
     rayId: request.headers.get("cf-ray"),
     message: error instanceof Error ? error.message : String(error),
+    details: error instanceof HttpError ? error.details : undefined,
     stack: error instanceof Error ? error.stack : undefined,
   };
   console.error(JSON.stringify(payload));
@@ -422,17 +426,23 @@ async function verifyTurnstileIfRequired(
   if (!response) {
     unavailable("Turnstile verification is unavailable");
   }
+  const result = (await response.json().catch(() => null)) as
+    | { success?: boolean; "error-codes"?: string[]; hostname?: string; action?: string }
+    | null;
+  const verificationDetails = {
+    turnstileStatus: response.status,
+    turnstileHostname: result?.hostname ?? null,
+    turnstileAction: result?.action ?? null,
+    turnstileErrorCodes: result?.["error-codes"] ?? [],
+  };
   if (!response.ok) {
     if (response.status >= 500) {
-      unavailable("Turnstile verification failed");
+      throw new HttpError(503, "Turnstile verification failed", verificationDetails);
     }
-    forbidden("Turnstile verification failed");
+    forbidden("Turnstile verification failed", verificationDetails);
   }
-  const result = (await response.json().catch(() => null)) as
-    | { success?: boolean }
-    | null;
   if (!result?.success) {
-    forbidden("Turnstile verification failed");
+    forbidden("Turnstile verification failed", verificationDetails);
   }
 }
 
@@ -515,6 +525,30 @@ async function getAuthedAccount(request: Request, ctx: RequestContext): Promise<
     createdAtMs: rowNumber(row.created_at),
     sessionId: row.session_id,
   };
+}
+
+function adminHandles(ctx: RequestContext): Set<string> {
+  return new Set(
+    (ctx.env.NEXT_PUBLIC_ADMIN_HANDLES ?? "")
+      .split(",")
+      .map((handle) => normalizeUsername(handle).toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function accountIsAdmin(ctx: RequestContext, account: AccountIdentity): boolean {
+  return adminHandles(ctx).has(normalizeUsername(account.handle).toLowerCase());
+}
+
+async function requireAdminAccount(request: Request, ctx: RequestContext): Promise<AccountIdentity> {
+  const account = await getAuthedAccount(request, ctx);
+  if (!account) {
+    unauthorized("Admin access requires sign in");
+  }
+  if (!accountIsAdmin(ctx, account)) {
+    forbidden("Admin access required");
+  }
+  return account;
 }
 
 function normalizeDisplayName(raw: string, maxLength = 24): string {
@@ -2143,6 +2177,298 @@ async function deleteAccount(request: Request, ctx: RequestContext, body: Record
   return json({ ok: true, deleted: true });
 }
 
+async function listAdminUsers(request: Request, ctx: RequestContext): Promise<Response> {
+  await requireAdminAccount(request, ctx);
+  const url = new URL(request.url);
+  const query = (url.searchParams.get("query") ?? "").trim().toLowerCase();
+  const likeQuery = query ? `%${query}%` : "";
+  const limit = parseInteger(url.searchParams.get("limit") ?? "30", { min: 1, max: 100 });
+
+  if (!ctx.env.DB) {
+    const memory = getMemoryState();
+    const users = [...memory.accountsById.values()]
+      .filter((account) => !query || account.handle.toLowerCase().includes(query))
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .slice(0, limit)
+      .map((account) => ({
+        id: account.id,
+        handle: account.handle,
+        rating: account.rating,
+        locale: account.locale,
+        verifiedRuns: account.verifiedRuns,
+        createdAt: toIso(account.createdAtMs),
+        deletedAt: account.deletedAtMs == null ? null : toIso(account.deletedAtMs),
+        sessionCount: [...memory.accountSessions.values()].filter((session) => session.accountId === account.id)
+          .length,
+        scoreCount: memory.leaderboardScores.filter(
+          (score) => score.accountId === account.id || score.username.toLowerCase() === account.handle.toLowerCase(),
+        ).length,
+        challengeScoreCount: memory.challengeScores.filter(
+          (score) => score.accountId === account.id || score.username.toLowerCase() === account.handle.toLowerCase(),
+        ).length,
+        replayShareCount: [...memory.replayShares.values()].filter((replay) => replay.accountId === account.id)
+          .length,
+        webhookCount: [...memory.webhooks.values()].filter((webhook) => webhook.accountId === account.id).length,
+      }));
+    return json({ users });
+  }
+
+  const rows = await dbAll<{
+    id: string;
+    handle: string;
+    rating: number;
+    locale: string;
+    verified_runs: number;
+    created_at: number;
+    deleted_at: number | null;
+    session_count: number;
+    score_count: number;
+    challenge_score_count: number;
+    replay_share_count: number;
+    webhook_count: number;
+  }>(
+    ctx.env.DB,
+    `SELECT a.id,
+            a.handle,
+            a.rating,
+            a.locale,
+            a.verified_runs,
+            a.created_at,
+            a.deleted_at,
+            (SELECT COUNT(*) FROM account_sessions s WHERE s.account_id = a.id) AS session_count,
+            (SELECT COUNT(*) FROM leaderboard_scores ls WHERE ls.account_id = a.id OR lower(ls.username) = lower(a.handle)) AS score_count,
+            (SELECT COUNT(*) FROM challenge_scores cs WHERE cs.account_id = a.id OR lower(cs.username) = lower(a.handle)) AS challenge_score_count,
+            (SELECT COUNT(*) FROM replay_shares rs WHERE rs.account_id = a.id) AS replay_share_count,
+            (SELECT COUNT(*) FROM webhook_endpoints wh WHERE wh.account_id = a.id) AS webhook_count
+       FROM accounts a
+      WHERE (? = '' OR lower(a.handle) LIKE ?)
+      ORDER BY a.created_at DESC
+      LIMIT ?`,
+    query,
+    likeQuery,
+    limit,
+  );
+
+  return json({
+    users: rows.map((row) => ({
+      id: row.id,
+      handle: row.handle,
+      rating: rowNumber(row.rating),
+      locale: row.locale,
+      verifiedRuns: rowNumber(row.verified_runs),
+      createdAt: toIso(rowNumber(row.created_at)),
+      deletedAt: row.deleted_at == null ? null : toIso(rowNumber(row.deleted_at)),
+      sessionCount: rowNumber(row.session_count),
+      scoreCount: rowNumber(row.score_count),
+      challengeScoreCount: rowNumber(row.challenge_score_count),
+      replayShareCount: rowNumber(row.replay_share_count),
+      webhookCount: rowNumber(row.webhook_count),
+    })),
+  });
+}
+
+async function deleteAdminUser(
+  request: Request,
+  ctx: RequestContext,
+  accountId: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const admin = await requireAdminAccount(request, ctx);
+  if (admin.id === accountId) {
+    unprocessable("Use the regular account deletion flow for your own account");
+  }
+  const confirmHandle = parseString(body.confirmHandle, { min: 2, max: 24 });
+
+  if (!ctx.env.DB) {
+    const memory = getMemoryState();
+    const account = memory.accountsById.get(accountId);
+    if (!account) {
+      notFound("Account not found");
+    }
+    if (normalizeUsername(confirmHandle).toLowerCase() !== normalizeUsername(account.handle).toLowerCase()) {
+      unprocessable("Handle confirmation does not match");
+    }
+    memory.accountsById.delete(account.id);
+    memory.accountsByHandle.delete(account.handleNormalized);
+    memory.preferences.delete(account.id);
+    for (const [id, session] of memory.accountSessions.entries()) {
+      if (session.accountId === account.id) {
+        memory.accountSessions.delete(id);
+      }
+    }
+    memory.leaderboardScores = memory.leaderboardScores.filter(
+      (score) => score.accountId !== account.id && score.username.toLowerCase() !== account.handle.toLowerCase(),
+    );
+    memory.challengeScores = memory.challengeScores.filter(
+      (score) => score.accountId !== account.id && score.username.toLowerCase() !== account.handle.toLowerCase(),
+    );
+    for (const [id, replay] of memory.replayShares.entries()) {
+      if (replay.accountId === account.id) {
+        memory.replayShares.delete(id);
+      }
+    }
+    for (const [id, requestEntry] of memory.friendRequests.entries()) {
+      if (requestEntry.fromAccountId === account.id || requestEntry.toAccountId === account.id) {
+        memory.friendRequests.delete(id);
+      }
+    }
+    for (const [id, webhook] of memory.webhooks.entries()) {
+      if (webhook.accountId === account.id) {
+        memory.webhooks.delete(id);
+      }
+    }
+    removeFromQueue(memory.rankedQueue, account.id);
+    removeFromQueue(memory.casualQueue, account.id);
+    const duelId = memory.accountToDuel.get(account.id);
+    if (duelId) {
+      memory.activeDuels.delete(duelId);
+      memory.accountToDuel.delete(account.id);
+    }
+    return json({ ok: true, deleted: true });
+  }
+
+  const row = await dbFirst<{ id: string; handle: string }>(
+    ctx.env.DB,
+    `SELECT id, handle FROM accounts WHERE id = ?`,
+    accountId,
+  );
+  if (!row) {
+    notFound("Account not found");
+  }
+  if (normalizeUsername(confirmHandle).toLowerCase() !== normalizeUsername(row.handle).toLowerCase()) {
+    unprocessable("Handle confirmation does not match");
+  }
+  await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE username = ? OR account_id = ?`, row.handle, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM challenge_scores WHERE username = ? OR account_id = ?`, row.handle, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM replay_shares WHERE account_id = ?`, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM account_friend_requests WHERE from_account_id = ? OR to_account_id = ?`, row.id, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM webhook_endpoints WHERE account_id = ?`, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM account_sessions WHERE account_id = ?`, row.id);
+  await dbRun(ctx.env.DB, `DELETE FROM account_preferences WHERE account_id = ?`, row.id);
+  const result = await dbRun(ctx.env.DB, `DELETE FROM accounts WHERE id = ?`, row.id);
+  if ((result.meta?.changes ?? 0) !== 1) {
+    notFound("Account not found");
+  }
+  return json({ ok: true, deleted: true });
+}
+
+async function listAdminLeaderboard(request: Request, ctx: RequestContext): Promise<Response> {
+  await requireAdminAccount(request, ctx);
+  const url = new URL(request.url);
+  const query = (url.searchParams.get("query") ?? "").trim().toLowerCase();
+  const likeQuery = query ? `%${query}%` : "";
+  const modeParam = url.searchParams.get("mode") ?? "all";
+  if (modeParam !== "all" && !isMode(modeParam)) {
+    badRequest("Invalid leaderboard mode");
+  }
+  const limit = parseInteger(url.searchParams.get("limit") ?? "50", { min: 1, max: 100 });
+
+  if (!ctx.env.DB) {
+    const memory = getMemoryState();
+    const entries = memory.leaderboardScores
+      .filter((score) => !query || score.username.toLowerCase().includes(query))
+      .filter((score) => modeParam === "all" || score.mode === modeParam)
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .slice(0, limit)
+      .map((score) => ({
+        id: score.id,
+        sessionId: score.sessionId,
+        accountId: score.accountId,
+        username: score.username,
+        mode: score.mode,
+        wpm: score.wpm,
+        raw: score.raw,
+        accuracy: score.accuracy,
+        errors: score.errors,
+        streak: score.streak,
+        durationMs: score.durationMs,
+        certified: score.certified,
+        createdAt: toIso(score.createdAtMs),
+      }));
+    return json({ entries });
+  }
+
+  const rows = await dbAll<{
+    id: string;
+    session_id: string;
+    account_id: string | null;
+    username: string;
+    mode: string;
+    wpm: number;
+    raw: number;
+    accuracy: number;
+    errors: number;
+    streak: number;
+    duration_ms: number;
+    certified: number;
+    created_at: number;
+  }>(
+    ctx.env.DB,
+    `SELECT id,
+            session_id,
+            account_id,
+            username,
+            mode,
+            wpm,
+            raw,
+            accuracy,
+            errors,
+            streak,
+            duration_ms,
+            certified,
+            created_at
+       FROM leaderboard_scores
+      WHERE (? = '' OR lower(username) LIKE ?)
+        AND (? = 'all' OR mode = ?)
+      ORDER BY created_at DESC
+      LIMIT ?`,
+    query,
+    likeQuery,
+    modeParam,
+    modeParam,
+    limit,
+  );
+  return json({
+    entries: rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      accountId: row.account_id,
+      username: row.username,
+      mode: row.mode,
+      wpm: rowNumber(row.wpm),
+      raw: rowNumber(row.raw),
+      accuracy: rowNumber(row.accuracy),
+      errors: rowNumber(row.errors),
+      streak: rowNumber(row.streak),
+      durationMs: rowNumber(row.duration_ms),
+      certified: rowBoolean(row.certified),
+      createdAt: toIso(rowNumber(row.created_at)),
+    })),
+  });
+}
+
+async function deleteAdminLeaderboardScore(
+  request: Request,
+  ctx: RequestContext,
+  scoreId: string,
+): Promise<Response> {
+  await requireAdminAccount(request, ctx);
+  if (!ctx.env.DB) {
+    const memory = getMemoryState();
+    const before = memory.leaderboardScores.length;
+    memory.leaderboardScores = memory.leaderboardScores.filter((score) => score.id !== scoreId);
+    if (memory.leaderboardScores.length === before) {
+      notFound("Leaderboard score not found");
+    }
+    return json({ ok: true, deleted: true });
+  }
+  const result = await dbRun(ctx.env.DB, `DELETE FROM leaderboard_scores WHERE id = ?`, scoreId);
+  if ((result.meta?.changes ?? 0) !== 1) {
+    notFound("Leaderboard score not found");
+  }
+  return json({ ok: true, deleted: true });
+}
+
 async function shareReplay(
   request: Request,
   ctx: RequestContext,
@@ -3515,6 +3841,22 @@ export async function handleApiRequest(request: Request, path: string[], env: Ru
 
     if (path.length === 1 && path[0] === "account" && request.method === "DELETE") {
       return await deleteAccount(request, ctx, await readJson(request));
+    }
+
+    if (path.length === 2 && path[0] === "admin" && path[1] === "users" && request.method === "GET") {
+      return await listAdminUsers(request, ctx);
+    }
+
+    if (path.length === 3 && path[0] === "admin" && path[1] === "users" && request.method === "DELETE") {
+      return await deleteAdminUser(request, ctx, decodeURIComponent(path[2] ?? ""), await readJson(request));
+    }
+
+    if (path.length === 2 && path[0] === "admin" && path[1] === "leaderboard" && request.method === "GET") {
+      return await listAdminLeaderboard(request, ctx);
+    }
+
+    if (path.length === 3 && path[0] === "admin" && path[1] === "leaderboard" && request.method === "DELETE") {
+      return await deleteAdminLeaderboardScore(request, ctx, decodeURIComponent(path[2] ?? ""));
     }
 
     if (path.length === 2 && path[0] === "replay" && path[1] === "share" && request.method === "POST") {

@@ -14,11 +14,15 @@ import {
   changeAccountPassword,
   deleteWebhook,
   deleteAccount,
+  deleteAdminLeaderboardScore,
+  deleteAdminUser,
   enqueueCasualDuel,
   enqueueRanked,
   exportAccountData,
   fetchAccountProfile,
   fetchAccountSessions,
+  fetchAdminLeaderboard,
+  fetchAdminUsers,
   fetchAnalyticsSummary,
   fetchChallengeLeaderboard,
   fetchCurrentSeason,
@@ -57,6 +61,8 @@ import {
   ApiError,
   type AccountProfile,
   type AccountSessionEntry,
+  type AdminLeaderboardEntry,
+  type AdminUserEntry,
   type AnalyticsSummaryResponse,
   type ChallengeLeaderboardEntry,
   type DailyChallenge,
@@ -119,7 +125,22 @@ const CODE_SNIPPETS = [
 ];
 
 export type AppRoute = "home" | "play" | "social" | "boards" | "lab" | "profile" | "privacy" | "settings";
-type ProfileSubroute = "overview" | "account" | "social" | "sharing";
+type ProfileSubroute =
+  | "overview"
+  | "account"
+  | "security"
+  | "data"
+  | "friends"
+  | "duels"
+  | "replays"
+  | "webhooks"
+  | "admin";
+const ADMIN_HANDLES = new Set(
+  (process.env.NEXT_PUBLIC_ADMIN_HANDLES ?? "")
+    .split(",")
+    .map((handle) => handle.trim().toLowerCase())
+    .filter(Boolean),
+);
 
 const ROUTE_LABELS: Record<AppRoute, string> = {
   home: "Home",
@@ -229,8 +250,13 @@ function modeFromPathname(pathname: string): Mode | null {
 function profileSubrouteFromPathname(pathname: string): ProfileSubroute {
   const normalized = pathname.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
   if (normalized === "/profile/account") return "account";
-  if (normalized === "/profile/social") return "social";
-  if (normalized === "/profile/sharing") return "sharing";
+  if (normalized === "/profile/security") return "security";
+  if (normalized === "/profile/data") return "data";
+  if (normalized === "/profile/friends") return "friends";
+  if (normalized === "/profile/duels") return "duels";
+  if (normalized === "/profile/replays") return "replays";
+  if (normalized === "/profile/webhooks") return "webhooks";
+  if (normalized === "/profile/admin") return "admin";
   return "overview";
 }
 
@@ -944,6 +970,12 @@ export default function App() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookEvents, setWebhookEvents] = useState("score.submitted");
   const [webhooks, setWebhooks] = useState<WebhookEndpoint[]>([]);
+  const [webhookNote, setWebhookNote] = useState<string | null>(null);
+  const [adminUserQuery, setAdminUserQuery] = useState("");
+  const [adminUsers, setAdminUsers] = useState<AdminUserEntry[]>([]);
+  const [adminLeaderboardQuery, setAdminLeaderboardQuery] = useState("");
+  const [adminLeaderboardRows, setAdminLeaderboardRows] = useState<AdminLeaderboardEntry[]>([]);
+  const [adminNote, setAdminNote] = useState<string | null>(null);
 
   const [settings, setSettings] = useState({
     punctuation: false,
@@ -965,6 +997,9 @@ export default function App() {
   }, []);
   const analyticsEnabled = privacyConsent?.analytics === true && !doNotTrackEnabled;
   const canStoreComfortPrefs = privacyConsent?.preferences === true;
+  const isAnalyticsAdmin = Boolean(
+    accountProfile && ADMIN_HANDLES.has(accountProfile.handle.trim().toLowerCase()),
+  );
   const clientViewportBucket =
     typeof window !== "undefined" ? viewportBucket(window.innerWidth) : ("lg" as const);
   const localProfileSummary = useMemo(() => {
@@ -1217,6 +1252,7 @@ export default function App() {
         if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
           setAccountProfile(parsed);
           setAuthHandle(parsed.handle);
+          setUsername(parsed.handle);
         }
       }
       const storedAccountPrefs = localStorage.getItem(STORAGE_ACCOUNT_PREFS);
@@ -1709,11 +1745,11 @@ export default function App() {
     if (appRoute !== "privacy") {
       return;
     }
-    if (analyticsAdminToken.trim() || isDevEnvironment) {
+    if (isAnalyticsAdmin && (analyticsAdminToken.trim() || isDevEnvironment)) {
       void refreshAnalyticsSummary();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appRoute, isDevEnvironment]);
+  }, [appRoute, isAnalyticsAdmin, isDevEnvironment]);
 
   async function refreshChallengeAndSeason(silent = false): Promise<void> {
     if (!silent) {
@@ -1775,6 +1811,69 @@ export default function App() {
     }
   }
 
+  async function refreshAdminUsers(): Promise<void> {
+    if (!accountToken || !isAnalyticsAdmin) {
+      setAdminUsers([]);
+      return;
+    }
+    try {
+      const payload = await fetchAdminUsers(accountToken, {
+        query: adminUserQuery,
+        limit: 40,
+      });
+      setAdminUsers(payload.users);
+      setAdminNote(null);
+    } catch (error) {
+      setAdminNote((error as Error).message);
+      setAdminUsers([]);
+    }
+  }
+
+  async function refreshAdminLeaderboardRows(): Promise<void> {
+    if (!accountToken || !isAnalyticsAdmin) {
+      setAdminLeaderboardRows([]);
+      return;
+    }
+    try {
+      const payload = await fetchAdminLeaderboard(accountToken, {
+        query: adminLeaderboardQuery,
+        mode: "all",
+        limit: 50,
+      });
+      setAdminLeaderboardRows(payload.entries);
+      setAdminNote(null);
+    } catch (error) {
+      setAdminNote((error as Error).message);
+      setAdminLeaderboardRows([]);
+    }
+  }
+
+  async function removeAdminUser(user: AdminUserEntry): Promise<void> {
+    if (!accountToken || !isAnalyticsAdmin) return;
+    const confirmHandle = window.prompt(`Type ${user.handle} to delete this account and its related data.`);
+    if (confirmHandle == null) return;
+    try {
+      await deleteAdminUser(accountToken, user.id, confirmHandle);
+      setAdminNote(`Deleted account ${user.handle}.`);
+      await Promise.all([refreshAdminUsers(), refreshAdminLeaderboardRows(), refreshLeaderboard(true)]);
+    } catch (error) {
+      setAdminNote((error as Error).message);
+    }
+  }
+
+  async function removeAdminLeaderboardRow(row: AdminLeaderboardEntry): Promise<void> {
+    if (!accountToken || !isAnalyticsAdmin) return;
+    const confirmed = window.confirm(`Remove ${row.username}'s ${row.wpm.toFixed(1)} WPM ${row.mode} score?`);
+    if (!confirmed) return;
+    try {
+      await deleteAdminLeaderboardScore(accountToken, row.id);
+      setAdminNote(`Removed score ${row.id.slice(0, 8)}.`);
+      await Promise.all([refreshAdminLeaderboardRows(), refreshLeaderboard(true)]);
+    } catch (error) {
+      setAdminNote((error as Error).message);
+    }
+  }
+
   useEffect(() => {
     if (!accountToken) {
       setAccountProfile(null);
@@ -1782,6 +1881,8 @@ export default function App() {
       setActiveDuel(null);
       setRankedStatus("idle");
       setWebhooks([]);
+      setAdminUsers([]);
+      setAdminLeaderboardRows([]);
       return;
     }
     void refreshAccountProfile(accountToken);
@@ -1978,6 +2079,7 @@ export default function App() {
       setAccountProfile(payload.account);
       setAccountPrefs(payload.preferences);
       setAuthHandle(payload.account.handle);
+      setUsername(payload.account.handle);
       const prefs = asRecord(payload.preferences);
       if (prefs) {
         const storedConsent = asRecord(prefs.privacyConsent);
@@ -2080,6 +2182,7 @@ export default function App() {
       });
       setAccountToken(payload.token);
       setAccountProfile(payload.account);
+      setUsername(payload.account.handle);
       setAuthPassword("");
       setAuthNote("Account created and signed in.");
       trackPrivacyEvent("auth_register", { page: "profile" });
@@ -2116,6 +2219,7 @@ export default function App() {
       });
       setAccountToken(payload.token);
       setAccountProfile(payload.account);
+      setUsername(payload.account.handle);
       setAuthPassword("");
       setAuthNote("Signed in.");
       trackPrivacyEvent("auth_login", { page: "profile" });
@@ -2440,24 +2544,27 @@ export default function App() {
   async function refreshWebhooks(): Promise<void> {
     if (!liveSocialEnabled) {
       setWebhooks([]);
+      setWebhookNote(socialLaunchNote);
       return;
     }
     if (!accountToken) {
       setWebhooks([]);
+      setWebhookNote("Sign in to manage webhook endpoints.");
       return;
     }
     try {
       const payload = await listWebhooks(accountToken);
       setWebhooks(payload.entries);
+      setWebhookNote(`Loaded ${payload.entries.length} webhook${payload.entries.length === 1 ? "" : "s"}.`);
     } catch (_error) {
-      // no-op
+      setWebhookNote((_error as Error).message);
     }
   }
 
   async function createWebhookFlow(): Promise<void> {
     if (!accountToken || !webhookUrl.trim()) return;
     if (!liveSocialEnabled) {
-      setAuthNote(socialLaunchNote);
+      setWebhookNote(socialLaunchNote);
       return;
     }
     try {
@@ -2469,39 +2576,40 @@ export default function App() {
           .map((item) => item.trim().toLowerCase())
           .filter(Boolean),
       );
-      setAuthNote(`Webhook created. Secret: ${created.secret ?? "hidden"}`);
+      setWebhookNote(`Webhook created. Secret: ${created.secret ?? "hidden"}`);
       setWebhookUrl("");
       await refreshWebhooks();
     } catch (error) {
-      setAuthNote((error as Error).message);
+      setWebhookNote((error as Error).message);
     }
   }
 
   async function deleteWebhookFlow(id: string): Promise<void> {
     if (!accountToken) return;
     if (!liveSocialEnabled) {
-      setAuthNote(socialLaunchNote);
+      setWebhookNote(socialLaunchNote);
       return;
     }
     try {
       await deleteWebhook(accountToken, id);
+      setWebhookNote("Webhook removed.");
       await refreshWebhooks();
     } catch (error) {
-      setAuthNote((error as Error).message);
+      setWebhookNote((error as Error).message);
     }
   }
 
   async function testWebhookFlow(id: string): Promise<void> {
     if (!accountToken) return;
     if (!liveSocialEnabled) {
-      setAuthNote(socialLaunchNote);
+      setWebhookNote(socialLaunchNote);
       return;
     }
     try {
       await testWebhook(accountToken, id);
-      setAuthNote("Webhook test sent.");
+      setWebhookNote("Webhook test sent.");
     } catch (error) {
-      setAuthNote((error as Error).message);
+      setWebhookNote((error as Error).message);
     }
   }
 
@@ -3592,7 +3700,7 @@ export default function App() {
       const scorePayload = {
         sessionId: runtime.sessionId,
         mode,
-        username: accountProfile?.handle?.trim() || username.trim() || "player",
+        username: accountProfile?.handle?.trim() || authHandle.trim() || username.trim() || "player",
         wpm: Number(summary.wpm.toFixed(2)),
         raw: Number(summary.raw.toFixed(2)),
         accuracy: Number(summary.accuracy.toFixed(2)),
@@ -4331,6 +4439,19 @@ export default function App() {
   );
   const previewMode = modePreview ?? mode;
   const profileSubroute = profileSubrouteFromPathname(pathname || "/");
+  useEffect(() => {
+    if (appRoute !== "profile" || profileSubroute !== "admin") {
+      return;
+    }
+    if (!isAnalyticsAdmin || !accountToken) {
+      setAdminUsers([]);
+      setAdminLeaderboardRows([]);
+      return;
+    }
+    void refreshAdminUsers();
+    void refreshAdminLeaderboardRows();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountToken, appRoute, isAnalyticsAdmin, profileSubroute]);
   const runIndicatorCards = [
     { key: "mode", label: "Mode", value: MODE_META[mode].label },
     { key: "pack", label: "Pack", value: dictionaryPack.toUpperCase() },
@@ -4403,6 +4524,17 @@ export default function App() {
           ))}
         </nav>
         <div className="site-tools">
+          {accountProfile ? (
+            <Link href={pathForProfileSubroute("account")} className="auth-chip signed-in">
+              <span>Account</span>
+              <strong>{accountProfile.handle}</strong>
+            </Link>
+          ) : (
+            <Link href={pathForProfileSubroute("account")} className="auth-chip guest">
+              <span>Guest</span>
+              <strong>Sign in</strong>
+            </Link>
+          )}
           <button
             className="theme-toggle"
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -5307,17 +5439,49 @@ export default function App() {
                   Account
                 </Link>
                 <Link
-                  href={pathForProfileSubroute("social")}
-                  className={`profile-tab-link ${profileSubroute === "social" ? "active" : ""}`}
+                  href={pathForProfileSubroute("security")}
+                  className={`profile-tab-link ${profileSubroute === "security" ? "active" : ""}`}
                 >
-                  Social
+                  Security
                 </Link>
                 <Link
-                  href={pathForProfileSubroute("sharing")}
-                  className={`profile-tab-link ${profileSubroute === "sharing" ? "active" : ""}`}
+                  href={pathForProfileSubroute("data")}
+                  className={`profile-tab-link ${profileSubroute === "data" ? "active" : ""}`}
                 >
-                  Sharing
+                  Data
                 </Link>
+                <Link
+                  href={pathForProfileSubroute("friends")}
+                  className={`profile-tab-link ${profileSubroute === "friends" ? "active" : ""}`}
+                >
+                  Friends
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("duels")}
+                  className={`profile-tab-link ${profileSubroute === "duels" ? "active" : ""}`}
+                >
+                  Duels
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("replays")}
+                  className={`profile-tab-link ${profileSubroute === "replays" ? "active" : ""}`}
+                >
+                  Replays
+                </Link>
+                <Link
+                  href={pathForProfileSubroute("webhooks")}
+                  className={`profile-tab-link ${profileSubroute === "webhooks" ? "active" : ""}`}
+                >
+                  Webhooks
+                </Link>
+                {isAnalyticsAdmin && (
+                  <Link
+                    href={pathForProfileSubroute("admin")}
+                    className={`profile-tab-link ${profileSubroute === "admin" ? "active" : ""}`}
+                  >
+                    Admin
+                  </Link>
+                )}
               </div>
             </section>
           )}
@@ -5327,27 +5491,37 @@ export default function App() {
               <article className="profile-overview-card">
                 <div className="profile-illustration profile-illustration--shield" aria-hidden="true" />
                 <h3>Account</h3>
-                <p>Sign in, change your password, manage active sessions, export your data, or remove the account.</p>
+                <p>Sign in, confirm your current identity, and keep the account basics separate from heavier tools.</p>
                 <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("account"))}>
                   Open account
                 </button>
               </article>
               <article className="profile-overview-card">
                 <div className="profile-illustration profile-illustration--signal" aria-hidden="true" />
-                <h3>Social</h3>
-                <p>Manage friends, cloud sync, ranked queue, and active duel status from one place.</p>
-                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("social"))}>
-                  Open social
+                <h3>Friends</h3>
+                <p>Manage friend requests and sync preferences without ranked queue controls in the way.</p>
+                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("friends"))}>
+                  Open friends
                 </button>
               </article>
               <article className="profile-overview-card">
                 <div className="profile-illustration profile-illustration--relay" aria-hidden="true" />
-                <h3>Sharing</h3>
-                <p>Replay share links and webhook destinations live together in a separate sharing workspace.</p>
-                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("sharing"))}>
-                  Open sharing
+                <h3>Security</h3>
+                <p>Password changes, session review, exports, and deletion are split into focused account pages.</p>
+                <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("security"))}>
+                  Open security
                 </button>
               </article>
+              {isAnalyticsAdmin && (
+                <article className="profile-overview-card">
+                  <div className="profile-illustration profile-illustration--signal" aria-hidden="true" />
+                  <h3>Admin</h3>
+                  <p>Review accounts, remove abusive users, and moderate leaderboard rows from one focused page.</p>
+                  <button className="ghost-btn" onClick={() => router.push(pathForProfileSubroute("admin"))}>
+                    Open admin
+                  </button>
+                </article>
+              )}
             </section>
           )}
 
@@ -5392,53 +5566,68 @@ export default function App() {
           {appRoute === "profile" && profileSubroute === "account" && (
             <section className="leaderboard-block profile-section">
               <h3>Account</h3>
-              <label>
-                Handle
-                <input value={authHandle} onChange={(event) => setAuthHandle(event.target.value)} maxLength={24} />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  value={authPassword}
-                  onChange={(event) => setAuthPassword(event.target.value)}
-                  maxLength={128}
-                />
-              </label>
-              <label>
-                Locale
-                <input value={authLocale} onChange={(event) => setAuthLocale(event.target.value)} maxLength={12} />
-              </label>
-              <TurnstileWidget
-                siteKey={turnstileSiteKey}
-                resetKey={authTurnstileResetKey}
-                onTokenChange={setAuthTurnstileToken}
-              />
-              <div className="custom-actions profile-actions">
-                <button className="launch-btn" onClick={() => void registerAccountFlow()}>
-                  Register
-                </button>
-                <button className="ghost-btn" onClick={() => void loginAccountFlow()}>
-                  Login
-                </button>
-                <button
-                  className="ghost-btn"
-                  onClick={() => void logoutCurrentAccountFlow()}
-                >
-                  Logout
-                </button>
-              </div>
-              {accountProfile && (
-                <p className="dim">
-                  Signed in as <strong>{accountProfile.handle}</strong> · Rating {accountProfile.rating} · Verified{" "}
-                  {accountProfile.verifiedRuns}
-                </p>
+              {accountProfile ? (
+                <div className="account-state-card">
+                  <div>
+                    <p className="home-eyebrow">Signed in</p>
+                    <h4>{accountProfile.handle}</h4>
+                    <p className="dim">
+                      Rating {accountProfile.rating} · Verified runs {accountProfile.verifiedRuns} · Locale{" "}
+                      {accountProfile.locale}
+                    </p>
+                  </div>
+                  <div className="account-state-actions">
+                    <button className="ghost-btn" onClick={() => void refreshAccountProfile()}>
+                      Refresh profile
+                    </button>
+                    <button className="ghost-btn" onClick={() => void logoutCurrentAccountFlow()}>
+                      Sign out
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="dim profile-note">
+                    Guests can play locally. Sign in to sync profile data, manage friends, publish replays, and keep
+                    account-owned records.
+                  </p>
+                  <label>
+                    Handle
+                    <input value={authHandle} onChange={(event) => setAuthHandle(event.target.value)} maxLength={24} />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(event) => setAuthPassword(event.target.value)}
+                      maxLength={128}
+                    />
+                  </label>
+                  <label>
+                    Locale
+                    <input value={authLocale} onChange={(event) => setAuthLocale(event.target.value)} maxLength={12} />
+                  </label>
+                  <TurnstileWidget
+                    siteKey={turnstileSiteKey}
+                    resetKey={authTurnstileResetKey}
+                    onTokenChange={setAuthTurnstileToken}
+                  />
+                  <div className="custom-actions profile-actions">
+                    <button className="launch-btn" onClick={() => void registerAccountFlow()}>
+                      Register
+                    </button>
+                    <button className="ghost-btn" onClick={() => void loginAccountFlow()}>
+                      Login
+                    </button>
+                  </div>
+                </>
               )}
               {authNote && <p className="dim">{authNote}</p>}
             </section>
           )}
 
-          {appRoute === "profile" && profileSubroute === "account" && (
+          {appRoute === "profile" && profileSubroute === "security" && (
             <section className="leaderboard-block profile-section">
               <h3>Security + Sessions</h3>
               <div className="profile-lifecycle-grid">
@@ -5521,7 +5710,7 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && profileSubroute === "account" && (
+          {appRoute === "profile" && profileSubroute === "data" && (
             <section className="leaderboard-block profile-section">
               <h3>Data Rights</h3>
               <div className="profile-lifecycle-grid">
@@ -5556,7 +5745,7 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && profileSubroute === "social" && (
+          {appRoute === "profile" && profileSubroute === "friends" && (
             <section className="leaderboard-block">
               <h3>Cloud Sync + Friends</h3>
               {!liveSocialEnabled && <p className="dim">{socialLaunchNote}</p>}
@@ -5606,7 +5795,7 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && profileSubroute === "social" && (
+          {appRoute === "profile" && profileSubroute === "duels" && (
             <section className="leaderboard-block">
               <h3>Ranked + Duel</h3>
               {!liveSocialEnabled && <p className="dim">{socialLaunchNote}</p>}
@@ -5643,11 +5832,11 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "profile" && profileSubroute === "sharing" && (
+          {appRoute === "profile" && profileSubroute === "replays" && (
             <section className="leaderboard-block">
-              <h3>Replay Share + Webhooks</h3>
+              <h3>Replay Share</h3>
               <p className="dim">
-                Replay sharing and webhook endpoint management are account-only so every shared artifact has an owner.
+                Replay sharing is account-only so every shared artifact has an owner.
               </p>
               <label>
                 Share title
@@ -5691,6 +5880,16 @@ export default function App() {
                   </li>
                 ))}
               </ol>
+              {replayNote && <p className="dim">{replayNote}</p>}
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "webhooks" && (
+            <section className="leaderboard-block">
+              <h3>Webhooks</h3>
+              <p className="dim">
+                Send account-owned score, challenge, and test events to your own endpoint.
+              </p>
               <label>
                 Webhook URL
                 <input
@@ -5749,6 +5948,111 @@ export default function App() {
                   ))}
                 </div>
               )}
+              {webhookNote && <p className="dim">{webhookNote}</p>}
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "admin" && !isAnalyticsAdmin && (
+            <section className="leaderboard-block profile-section">
+              <h3>Admin</h3>
+              <p className="dim">Admin access requires a signed-in allowlisted handle.</p>
+            </section>
+          )}
+
+          {appRoute === "profile" && profileSubroute === "admin" && isAnalyticsAdmin && (
+            <section className="leaderboard-block profile-section">
+              <h3>Admin Controls</h3>
+              <p className="dim profile-note">
+                User deletion removes account-owned sessions, preferences, webhooks, replays, friend requests, and score
+                rows. Leaderboard removal deletes only the selected score row.
+              </p>
+              <div className="admin-grid">
+                <article className="profile-subcard admin-panel">
+                  <div className="profile-subcard-head">
+                    <div>
+                      <p className="home-eyebrow">Users</p>
+                      <h4>Accounts</h4>
+                    </div>
+                    <button className="ghost-btn" disabled={!accountToken} onClick={() => void refreshAdminUsers()}>
+                      Refresh
+                    </button>
+                  </div>
+                  <label>
+                    Search handle
+                    <input
+                      value={adminUserQuery}
+                      onChange={(event) => setAdminUserQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void refreshAdminUsers();
+                      }}
+                      maxLength={24}
+                    />
+                  </label>
+                  <ol className="admin-list">
+                    {adminUsers.map((user) => (
+                      <li key={user.id} className="admin-row">
+                        <div>
+                          <span>{user.handle}</span>
+                          <small>
+                            Rating {user.rating} · {user.scoreCount} scores · {user.sessionCount} sessions
+                          </small>
+                        </div>
+                        <button className="ghost-btn danger-btn" onClick={() => void removeAdminUser(user)}>
+                          Delete
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                  {adminUsers.length === 0 && <p className="dim profile-note">No users loaded.</p>}
+                </article>
+
+                <article className="profile-subcard admin-panel">
+                  <div className="profile-subcard-head">
+                    <div>
+                      <p className="home-eyebrow">Leaderboard</p>
+                      <h4>Score rows</h4>
+                    </div>
+                    <button
+                      className="ghost-btn"
+                      disabled={!accountToken}
+                      onClick={() => void refreshAdminLeaderboardRows()}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <label>
+                    Search player
+                    <input
+                      value={adminLeaderboardQuery}
+                      onChange={(event) => setAdminLeaderboardQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void refreshAdminLeaderboardRows();
+                      }}
+                      maxLength={24}
+                    />
+                  </label>
+                  <ol className="admin-list">
+                    {adminLeaderboardRows.map((row) => (
+                      <li key={row.id} className="admin-row">
+                        <div>
+                          <span>
+                            {row.username} · {row.mode}
+                          </span>
+                          <small>
+                            {row.wpm.toFixed(1)} WPM · {row.accuracy.toFixed(1)}% ·{" "}
+                            {new Date(row.createdAt).toLocaleDateString()}
+                          </small>
+                        </div>
+                        <button className="ghost-btn danger-btn" onClick={() => void removeAdminLeaderboardRow(row)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                  {adminLeaderboardRows.length === 0 && <p className="dim profile-note">No scores loaded.</p>}
+                </article>
+              </div>
+              {adminNote && <p className="dim profile-note">{adminNote}</p>}
             </section>
           )}
 
@@ -5902,7 +6206,7 @@ export default function App() {
             </section>
           )}
 
-          {appRoute === "privacy" && (
+          {appRoute === "privacy" && isAnalyticsAdmin && (
             <section className="leaderboard-block privacy-page">
               <h3>Analytics Summary</h3>
               <p className="dim">

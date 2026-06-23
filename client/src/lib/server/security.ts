@@ -4,6 +4,7 @@ import type { Mode } from "./types";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const USERNAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9 _.-]{0,22}[A-Za-z0-9])?$/;
+const PASSWORD_HASH_ITERATIONS = 100_000;
 
 interface TokenClaimsBase {
   aud: "session" | "account";
@@ -215,7 +216,7 @@ export async function createPasswordHash(password: string): Promise<{ salt: stri
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      iterations: 310_000,
+      iterations: PASSWORD_HASH_ITERATIONS,
       salt: saltBytes as BufferSource,
     },
     key,
@@ -239,7 +240,7 @@ export async function verifyPasswordHash(
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      iterations: 310_000,
+      iterations: PASSWORD_HASH_ITERATIONS,
       salt: hexToBytes(salt) as BufferSource,
     },
     key,
