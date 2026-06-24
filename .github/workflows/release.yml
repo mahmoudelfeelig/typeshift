@@ -53,51 +53,127 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
 
-          function required(name) {
+          const configPath = "client/wrangler.jsonc";
+          const baseConfig = fs.existsSync(configPath)
+            ? JSON.parse(fs.readFileSync(configPath, "utf8"))
+            : {};
+
+          function required(name, fallback) {
             const value = process.env[name];
-            if (!value) {
-              throw new Error(`Missing required GitHub Actions variable or secret: ${name}`);
+            if (value) {
+              return value;
             }
-            return value;
+            if (fallback) {
+              return fallback;
+            }
+            throw new Error(`Missing required GitHub Actions variable or secret: ${name}`);
           }
 
-          const siteUrl = required("NEXT_PUBLIC_SITE_URL");
+          function envOrBase(name, fallback) {
+            const value = process.env[name];
+            if (value) {
+              return value;
+            }
+            if (fallback !== undefined && fallback !== null && fallback !== "") {
+              return fallback;
+            }
+            return "";
+          }
+
+          function firstRouteHostname(config) {
+            const route = Array.isArray(config.routes) ? config.routes[0] : undefined;
+            if (route && typeof route.pattern === "string" && route.pattern.length > 0) {
+              return route.pattern;
+            }
+            return undefined;
+          }
+
+          function firstBindingValue(list, key) {
+            if (!Array.isArray(list)) {
+              return undefined;
+            }
+            const item = list[0];
+            if (!item || typeof item !== "object") {
+              return undefined;
+            }
+            return item[key];
+          }
+
+          const baseVars = baseConfig.vars || {};
+          const siteUrl =
+            envOrBase("NEXT_PUBLIC_SITE_URL", baseVars.NEXT_PUBLIC_SITE_URL) ||
+            (firstRouteHostname(baseConfig) ? `https://${firstRouteHostname(baseConfig)}` : "");
+
+          if (!siteUrl) {
+            throw new Error("Missing required GitHub Actions variable or secret: NEXT_PUBLIC_SITE_URL");
+          }
+
           const hostname = new URL(siteUrl).hostname;
+          const workerName = envOrBase("WORKER_NAME", baseConfig.name || "typeshift");
+          const cacheKvId = required(
+            "CF_CACHE_KV_ID",
+            Array.isArray(baseConfig.kv_namespaces)
+              ? baseConfig.kv_namespaces.find((entry) => entry.binding === "CACHE_KV")?.id
+              : undefined,
+          );
+          const rateLimitKvId = required(
+            "CF_RATE_LIMIT_KV_ID",
+            Array.isArray(baseConfig.kv_namespaces)
+              ? baseConfig.kv_namespaces.find((entry) => entry.binding === "RATE_LIMIT_KV")?.id
+              : undefined,
+          );
+          const d1DatabaseId = required(
+            "CF_D1_DATABASE_ID",
+            Array.isArray(baseConfig.d1_databases)
+              ? baseConfig.d1_databases.find((entry) => entry.binding === "DB")?.database_id
+              : undefined,
+          );
+          const nextCacheBucket =
+            Array.isArray(baseConfig.r2_buckets)
+              ? baseConfig.r2_buckets.find((entry) => entry.binding === "NEXT_INC_CACHE_R2_BUCKET")
+                  ?.bucket_name
+              : undefined;
+          const replayBucket =
+            Array.isArray(baseConfig.r2_buckets)
+              ? baseConfig.r2_buckets.find((entry) => entry.binding === "REPLAY_BUCKET")?.bucket_name
+              : undefined;
+          const backupBucket =
+            Array.isArray(baseConfig.r2_buckets)
+              ? baseConfig.r2_buckets.find((entry) => entry.binding === "BACKUP_BUCKET")?.bucket_name
+              : undefined;
+
           const config = {
             "$schema": "../node_modules/wrangler/config-schema.json",
-            name: "typeshift",
+            name: workerName,
             main: ".open-next/worker.js",
-            compatibility_date: "2026-03-08",
-            compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],
-            assets: {
+            compatibility_date: baseConfig.compatibility_date || "2026-03-08",
+            compatibility_flags:
+              baseConfig.compatibility_flags || ["nodejs_compat", "global_fetch_strictly_public"],
+            assets: baseConfig.assets || {
               directory: ".open-next/assets",
               binding: "ASSETS",
             },
             services: [
               {
                 binding: "WORKER_SELF_REFERENCE",
-                service: "typeshift",
+                service: workerName,
               },
             ],
             vars: {
               NEXTJS_ENV: "production",
-              NEXT_PUBLIC_SITE_NAME: process.env.NEXT_PUBLIC_SITE_NAME || "TypeShift",
+              NEXT_PUBLIC_SITE_NAME: envOrBase("NEXT_PUBLIC_SITE_NAME", baseVars.NEXT_PUBLIC_SITE_NAME || "TypeShift"),
               NEXT_PUBLIC_SITE_URL: siteUrl,
-              NEXT_PUBLIC_CONTROLLER_NAME: process.env.NEXT_PUBLIC_CONTROLLER_NAME || "TypeShift",
-              NEXT_PUBLIC_CONTACT_EMAIL: process.env.NEXT_PUBLIC_CONTACT_EMAIL || "",
-              NEXT_PUBLIC_CONTACT_ADDRESS: process.env.NEXT_PUBLIC_CONTACT_ADDRESS || "",
-              NEXT_PUBLIC_SUPPORT_EMAIL: process.env.NEXT_PUBLIC_SUPPORT_EMAIL || "",
-              NEXT_PUBLIC_DPO_EMAIL: process.env.NEXT_PUBLIC_DPO_EMAIL || "",
-              NEXT_PUBLIC_LEGAL_LAST_UPDATED:
-                process.env.NEXT_PUBLIC_LEGAL_LAST_UPDATED || "March 8, 2026",
-              NEXT_PUBLIC_SCORE_RETENTION_DAYS:
-                process.env.NEXT_PUBLIC_SCORE_RETENTION_DAYS || "365",
-              NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS:
-                process.env.NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS || "30",
-              NEXT_PUBLIC_TURNSTILE_SITE_KEY: required("NEXT_PUBLIC_TURNSTILE_SITE_KEY"),
-              NEXT_PUBLIC_ADMIN_HANDLES: process.env.NEXT_PUBLIC_ADMIN_HANDLES || "",
-              NEXT_PUBLIC_SOCIAL_LIVE_ENABLED:
-                process.env.NEXT_PUBLIC_SOCIAL_LIVE_ENABLED || "true",
+              NEXT_PUBLIC_CONTROLLER_NAME: envOrBase("NEXT_PUBLIC_CONTROLLER_NAME", baseVars.NEXT_PUBLIC_CONTROLLER_NAME || "TypeShift"),
+              NEXT_PUBLIC_CONTACT_EMAIL: envOrBase("NEXT_PUBLIC_CONTACT_EMAIL", baseVars.NEXT_PUBLIC_CONTACT_EMAIL),
+              NEXT_PUBLIC_CONTACT_ADDRESS: envOrBase("NEXT_PUBLIC_CONTACT_ADDRESS", baseVars.NEXT_PUBLIC_CONTACT_ADDRESS),
+              NEXT_PUBLIC_SUPPORT_EMAIL: envOrBase("NEXT_PUBLIC_SUPPORT_EMAIL", baseVars.NEXT_PUBLIC_SUPPORT_EMAIL),
+              NEXT_PUBLIC_DPO_EMAIL: envOrBase("NEXT_PUBLIC_DPO_EMAIL", baseVars.NEXT_PUBLIC_DPO_EMAIL),
+              NEXT_PUBLIC_LEGAL_LAST_UPDATED: envOrBase("NEXT_PUBLIC_LEGAL_LAST_UPDATED", baseVars.NEXT_PUBLIC_LEGAL_LAST_UPDATED || "March 8, 2026"),
+              NEXT_PUBLIC_SCORE_RETENTION_DAYS: envOrBase("NEXT_PUBLIC_SCORE_RETENTION_DAYS", baseVars.NEXT_PUBLIC_SCORE_RETENTION_DAYS || "365"),
+              NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS: envOrBase("NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS", baseVars.NEXT_PUBLIC_TELEMETRY_RETENTION_DAYS || "30"),
+              NEXT_PUBLIC_TURNSTILE_SITE_KEY: required("NEXT_PUBLIC_TURNSTILE_SITE_KEY", baseVars.NEXT_PUBLIC_TURNSTILE_SITE_KEY),
+              NEXT_PUBLIC_ADMIN_HANDLES: envOrBase("NEXT_PUBLIC_ADMIN_HANDLES", baseVars.NEXT_PUBLIC_ADMIN_HANDLES),
+              NEXT_PUBLIC_SOCIAL_LIVE_ENABLED: envOrBase("NEXT_PUBLIC_SOCIAL_LIVE_ENABLED", baseVars.NEXT_PUBLIC_SOCIAL_LIVE_ENABLED || "true"),
               NEXT_PUBLIC_CLOUDFLARE_ONLY: "true",
             },
             routes: [
@@ -110,28 +186,28 @@ jobs:
               {
                 binding: "DB",
                 database_name: "typeshift-prod",
-                database_id: required("CF_D1_DATABASE_ID"),
+                database_id: d1DatabaseId,
                 remote: true,
               },
             ],
             kv_namespaces: [
               {
                 binding: "CACHE_KV",
-                id: required("CF_CACHE_KV_ID"),
+                id: cacheKvId,
               },
               {
                 binding: "RATE_LIMIT_KV",
-                id: required("CF_RATE_LIMIT_KV_ID"),
+                id: rateLimitKvId,
                 remote: true,
               },
             ],
-            analytics_engine_datasets: [
+            analytics_engine_datasets: baseConfig.analytics_engine_datasets || [
               {
                 binding: "USAGE_ANALYTICS",
                 dataset: "typeshift_usage",
               },
             ],
-            observability: {
+            observability: baseConfig.observability || {
               enabled: true,
               head_sampling_rate: 1,
               logs: {
@@ -141,24 +217,24 @@ jobs:
             },
             r2_buckets: [
               {
-                bucket_name: "typeshift-next-cache",
+                bucket_name: nextCacheBucket || "typeshift-next-cache",
                 binding: "NEXT_INC_CACHE_R2_BUCKET",
                 remote: true,
               },
               {
-                bucket_name: "typeshift-replays",
+                bucket_name: replayBucket || "typeshift-replays",
                 binding: "REPLAY_BUCKET",
                 remote: true,
               },
               {
-                bucket_name: "typeshift-backups",
+                bucket_name: backupBucket || "typeshift-backups",
                 binding: "BACKUP_BUCKET",
                 remote: true,
               },
             ],
           };
 
-          fs.writeFileSync("client/wrangler.jsonc", `${JSON.stringify(config, null, 2)}\n`);
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
           NODE
 
       - name: Run tests
