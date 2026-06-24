@@ -1183,6 +1183,19 @@ export default function App() {
   const [liveAlertMessage, setLiveAlertMessage] = useState("");
   const [chainCombo, setChainCombo] = useState(1);
   const [coopTurn, setCoopTurn] = useState(1);
+
+  function clearRaceSession(message?: string) {
+    setRaceRoomId("");
+    setRaceRoomInput("");
+    setRacePlayerId("");
+    setRaceState(null);
+    setRaceError(message ?? null);
+    try {
+      localStorage.removeItem(STORAGE_RACE_META);
+    } catch (_error) {
+      // ignore storage write failures
+    }
+  }
   const [infectedIndices, setInfectedIndices] = useState<number[]>([]);
   const [certifiedRun, setCertifiedRun] = useState(false);
   const [modePreview, setModePreview] = useState<Mode | null>(null);
@@ -2265,7 +2278,7 @@ export default function App() {
 
   useEffect(() => {
     if (!liveSocialEnabled) {
-      setRaceState(null);
+      clearRaceSession();
       return;
     }
     if (!raceRoomId) {
@@ -2282,6 +2295,10 @@ export default function App() {
         })
         .catch((error) => {
           if (cancelled) return;
+          if (error instanceof ApiError && error.status === 404) {
+            clearRaceSession("Race room ended or no longer exists");
+            return;
+          }
           setRaceError((error as Error).message);
         });
     };
