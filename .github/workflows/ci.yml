@@ -41,6 +41,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Create CI Wrangler config
+        run: cp client/wrangler.example.jsonc client/wrangler.jsonc
+
       - name: Run tests
         run: npm run test
 
